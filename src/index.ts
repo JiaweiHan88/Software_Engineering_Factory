@@ -23,7 +23,7 @@ import { AgentDispatcher } from "./adapter/agent-dispatcher.js";
 import { SprintRunner } from "./adapter/sprint-runner.js";
 import { PaperclipLoop } from "./adapter/paperclip-loop.js";
 import { checkHealth, formatHealthResult } from "./adapter/health-check.js";
-import { Logger, loadLoggerConfig } from "./observability/logger.js";
+import { Logger } from "./observability/logger.js";
 import { initTracing, shutdownTracing } from "./observability/tracing.js";
 import { initMetrics, shutdownMetrics } from "./observability/metrics.js";
 import { StallDetector } from "./observability/stall-detector.js";

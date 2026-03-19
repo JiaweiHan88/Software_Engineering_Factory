@@ -54,7 +54,7 @@ services:
       - PAPERCLIP_URL=http://paperclip:3100
       - PAPERCLIP_ORG_ID=bmad-factory
       - PAPERCLIP_POLL_INTERVAL_MS=5000
-      - COPILOT_MODEL=${COPILOT_MODEL:-claude-sonnet-4.5}
+      - COPILOT_MODEL=${COPILOT_MODEL:-claude-sonnet-4.6}
       - COPILOT_LOG_LEVEL=${COPILOT_LOG_LEVEL:-warning}
       - COPILOT_GHE_HOST=${COPILOT_GHE_HOST:-}
       # Pass through BYOK API keys if provided

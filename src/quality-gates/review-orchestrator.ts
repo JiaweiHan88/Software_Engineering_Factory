@@ -23,7 +23,6 @@ import type {
   ReviewHistory,
   ReviewPassRecord,
   GateResult,
-  OrchestratorAction,
 } from "./types.js";
 import { evaluateGate, decideNextAction, formatGateReport, formatReviewTimeline } from "./engine.js";
 import type { BmadConfig } from "../config/config.js";
@@ -157,7 +156,7 @@ export function parseFindings(response: string): ReviewFinding[] {
   // Fallback: heuristic parsing for unstructured review output
   // Look for patterns like "HIGH: description" or "CRITICAL — file.ts: issue"
   const heuristicPattern =
-    /\b(LOW|MEDIUM|HIGH|CRITICAL)\b[:\s—\-]+(?:([^\n:]+\.(?:ts|js|tsx|jsx|json|yaml|yml|md))(?::(\d+))?[:\s—\-]+)?(.+?)(?:\n|$)/gi;
+    /\b(LOW|MEDIUM|HIGH|CRITICAL)\b[:\s—-]+(?:([^\n:]+\.(?:ts|js|tsx|jsx|json|yaml|yml|md))(?::(\d+))?[:\s—-]+)?(.+?)(?:\n|$)/gi;
 
   let findingIdx = 0;
   while ((match = heuristicPattern.exec(response)) !== null) {

@@ -11,7 +11,6 @@
  */
 
 import { resolve } from "node:path";
-import type { BmadAgent } from "../agents/types.js";
 import type { BmadConfig } from "../config/config.js";
 import { getAgent, allAgents } from "../agents/registry.js";
 import {

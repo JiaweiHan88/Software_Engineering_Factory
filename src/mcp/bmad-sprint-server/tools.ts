@@ -15,14 +15,14 @@
  */
 
 import { readFile, readdir } from "node:fs/promises";
-import { resolve, extname } from "node:path";
+import { resolve } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
   readSprintStatus,
   writeSprintStatus,
 } from "../../tools/sprint-status.js";
-import type { SprintStatusData, SprintStory } from "../../tools/sprint-status.js";
+import type { SprintStatusData } from "../../tools/sprint-status.js";
 import { loadConfig } from "../../config/index.js";
 import yaml from "js-yaml";
 

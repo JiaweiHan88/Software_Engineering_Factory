@@ -5,14 +5,17 @@
  * Each heartbeat carries context about an agent's assigned work.
  * The handler routes it to the AgentDispatcher for execution.
  *
- * In Phase 4 this will be called by the Paperclip API integration.
- * For now it can be called directly by the sprint runner or CLI.
+ * Two entry points:
+ * - `handleHeartbeat()` — direct call with a HeartbeatContext (used by sprint runner, CLI)
+ * - `handlePaperclipHeartbeat()` — accepts a PaperclipHeartbeat from the Paperclip API client
  *
  * @module adapter/heartbeat-handler
  */
 
 import { getAgent } from "../agents/registry.js";
 import type { AgentDispatcher, WorkPhase } from "./agent-dispatcher.js";
+import type { PaperclipHeartbeat } from "./paperclip-client.js";
+import type { PaperclipReporter } from "./reporter.js";
 
 export interface HeartbeatContext {
   /** Paperclip agent ID */
@@ -38,7 +41,7 @@ export interface HeartbeatResult {
 }
 
 /**
- * Handle a Paperclip heartbeat for a BMAD agent.
+ * Handle a Paperclip heartbeat for a BMAD agent (direct call).
  *
  * @param ctx - Heartbeat context from Paperclip
  * @param dispatcher - The agent dispatcher to route work through
@@ -97,6 +100,54 @@ export async function handleHeartbeat(
     message: `${agent.displayName}: Completed ${phase} for "${ctx.ticket.title}"`,
     storyId: ctx.ticket.storyId,
   };
+}
+
+/**
+ * Handle a heartbeat received from the Paperclip API.
+ *
+ * Converts the PaperclipHeartbeat format to a HeartbeatContext, dispatches
+ * the work, and reports the result back to Paperclip via the Reporter.
+ *
+ * @param heartbeat - Raw heartbeat from PaperclipClient.pollHeartbeats()
+ * @param dispatcher - The agent dispatcher to route work through
+ * @param reporter - Reporter to send results back to Paperclip
+ * @returns HeartbeatResult
+ */
+export async function handlePaperclipHeartbeat(
+  heartbeat: PaperclipHeartbeat,
+  dispatcher: AgentDispatcher,
+  reporter: PaperclipReporter,
+): Promise<HeartbeatResult> {
+  // Convert PaperclipHeartbeat → HeartbeatContext
+  const ctx: HeartbeatContext = {
+    agentId: heartbeat.agentId,
+    bmadRole: heartbeat.agentRole,
+    metadata: heartbeat.metadata,
+  };
+
+  if (heartbeat.ticket) {
+    ctx.ticket = {
+      id: heartbeat.ticket.id,
+      title: heartbeat.ticket.title,
+      description: heartbeat.ticket.description,
+      storyId: heartbeat.ticket.storyId,
+      phase: heartbeat.ticket.phase as WorkPhase | undefined,
+    };
+  }
+
+  // Process the heartbeat
+  const result = await handleHeartbeat(ctx, dispatcher);
+
+  // Report result back to Paperclip
+  if (heartbeat.ticket) {
+    await reporter.reportHeartbeatResult(
+      heartbeat.agentId,
+      heartbeat.ticket.id,
+      result,
+    );
+  }
+
+  return result;
 }
 
 /**

@@ -11,6 +11,7 @@
  *   pnpm start -- --dry-run          — Dry run (no SDK calls)
  *   pnpm start -- --status           — Print sprint status and exit
  *   pnpm start -- --dispatch <phase> <storyId> — Dispatch a single phase
+ *   pnpm start -- --paperclip        — Run Paperclip integration loop
  *
  * @module index
  */
@@ -20,8 +21,10 @@ import { allAgents } from "./agents/registry.js";
 import { SessionManager } from "./adapter/session-manager.js";
 import { AgentDispatcher } from "./adapter/agent-dispatcher.js";
 import { SprintRunner } from "./adapter/sprint-runner.js";
+import { PaperclipLoop } from "./adapter/paperclip-loop.js";
 import { checkHealth, formatHealthResult } from "./adapter/health-check.js";
 import type { SprintEvent } from "./adapter/sprint-runner.js";
+import type { PaperclipLoopEvent } from "./adapter/paperclip-loop.js";
 import type { WorkPhase } from "./adapter/agent-dispatcher.js";
 
 /**
@@ -54,10 +57,41 @@ function logEvent(event: SprintEvent): void {
 }
 
 /**
+ * Event handler that logs Paperclip loop events to console.
+ */
+function logPaperclipEvent(event: PaperclipLoopEvent): void {
+  switch (event.type) {
+    case "loop-start":
+      console.log(`\n🔄 Paperclip loop started — ${event.agentCount} agents registered`);
+      break;
+    case "agents-registered":
+      console.log(`📋 ${event.count} agents registered with Paperclip`);
+      break;
+    case "poll":
+      if (event.heartbeatCount > 0) {
+        console.log(`💓 Polled ${event.heartbeatCount} heartbeat(s)`);
+      }
+      break;
+    case "heartbeat-processed":
+      console.log(`✅ ${event.agentId}: ${event.result.status} — ${event.result.message}`);
+      break;
+    case "heartbeat-error":
+      console.log(`❌ ${event.agentId}: ${event.error}`);
+      break;
+    case "poll-error":
+      console.log(`⚠️  Poll error: ${event.error}`);
+      break;
+    case "loop-stop":
+      console.log(`🛑 Loop stopped: ${event.reason}`);
+      break;
+  }
+}
+
+/**
  * Parse CLI arguments.
  */
 function parseArgs(): {
-  mode: "sprint" | "story" | "dispatch" | "status" | "dry-run";
+  mode: "sprint" | "story" | "dispatch" | "status" | "dry-run" | "paperclip";
   storyId?: string;
   phase?: WorkPhase;
 } {
@@ -65,6 +99,10 @@ function parseArgs(): {
 
   if (args.includes("--status")) {
     return { mode: "status" };
+  }
+
+  if (args.includes("--paperclip")) {
+    return { mode: "paperclip" };
   }
 
   if (args.includes("--dry-run")) {
@@ -103,7 +141,8 @@ async function main(): Promise<void> {
   console.log(`📄 Sprint status: ${config.sprintStatusPath}`);
   console.log(`🤖 Model: ${config.model}`);
   console.log(`🔄 Review pass limit: ${config.reviewPassLimit}`);
-  console.log(`📋 Agents: ${allAgents.length}`);
+  console.log(`� Paperclip: ${config.paperclip.enabled ? `enabled (${config.paperclip.url})` : "disabled"}`);
+  console.log(`�📋 Agents: ${allAgents.length}`);
   for (const a of allAgents) {
     console.log(`   • ${a.displayName} (${a.name})`);
   }
@@ -132,6 +171,32 @@ async function main(): Promise<void> {
       onEvent: logEvent,
     });
     return;
+  }
+
+  // Paperclip mode — run the heartbeat-driven integration loop
+  if (cliArgs.mode === "paperclip") {
+    if (!config.paperclip.enabled) {
+      console.log("\n⚠️  Paperclip integration is disabled. Set PAPERCLIP_ENABLED=true to enable.");
+      console.log("   Falling back to standalone sprint mode.\n");
+    } else {
+      console.log(`\n📡 Paperclip mode — connecting to ${config.paperclip.url}`);
+      const loop = new PaperclipLoop(sessionManager, dispatcher, config);
+
+      // Handle graceful shutdown
+      const shutdown = async () => {
+        console.log("\n🛑 Shutting down...");
+        await loop.stop();
+        process.exit(0);
+      };
+      process.on("SIGINT", () => void shutdown());
+      process.on("SIGTERM", () => void shutdown());
+
+      await loop.start({
+        onEvent: logPaperclipEvent,
+        onDelta: (delta) => process.stdout.write(delta),
+      });
+      return;
+    }
   }
 
   // Live modes — start the SDK client

@@ -12,6 +12,7 @@
     "start": "tsx src/index.ts",
     "start:status": "tsx src/index.ts --status",
     "start:dry-run": "tsx src/index.ts --dry-run",
+    "start:paperclip": "PAPERCLIP_ENABLED=true tsx src/index.ts --paperclip",
     "test": "vitest run",
     "test:watch": "vitest",
     "sandbox:hello": "tsx src/sandbox/hello-copilot.ts",

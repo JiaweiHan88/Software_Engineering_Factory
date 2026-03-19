@@ -24,6 +24,7 @@ import { constants as fsConstants } from "node:fs";
 import type { BmadConfig } from "../config/config.js";
 import { allAgents } from "../agents/registry.js";
 import { allTools } from "../tools/index.js";
+import { PaperclipClient } from "./paperclip-client.js";
 
 /** Overall system health status */
 export type HealthStatus = "healthy" | "degraded" | "unhealthy";
@@ -142,6 +143,48 @@ async function checkSprintFile(config: BmadConfig): Promise<HealthProbe> {
 }
 
 /**
+ * Probe 5 — Ping the Paperclip server.
+ * Non-critical if Paperclip integration is disabled.
+ * Critical if PAPERCLIP_ENABLED=true.
+ */
+async function checkPaperclip(config: BmadConfig): Promise<HealthProbe> {
+  if (!config.paperclip.enabled) {
+    return {
+      name: "paperclip",
+      ok: true,
+      message: `Paperclip integration disabled (PAPERCLIP_ENABLED=false)`,
+      critical: false,
+    };
+  }
+
+  const client = new PaperclipClient({
+    baseUrl: config.paperclip.url,
+    apiKey: config.paperclip.apiKey,
+    orgId: config.paperclip.orgId,
+    timeoutMs: 5_000,
+  });
+
+  try {
+    const reachable = await client.ping();
+    return {
+      name: "paperclip",
+      ok: reachable,
+      message: reachable
+        ? `Paperclip reachable at ${config.paperclip.url}`
+        : `Paperclip not reachable at ${config.paperclip.url}`,
+      critical: true,
+    };
+  } catch {
+    return {
+      name: "paperclip",
+      ok: false,
+      message: `Paperclip connection failed: ${config.paperclip.url}`,
+      critical: true,
+    };
+  }
+}
+
+/**
  * Run all health probes and return an aggregated result.
  *
  * @param config - Resolved BMAD configuration
@@ -159,6 +202,7 @@ export async function checkHealth(config: BmadConfig): Promise<HealthCheckResult
     checkAgents(),
     checkTools(),
     await checkSprintFile(config),
+    await checkPaperclip(config),
   ];
 
   const criticalFailed = probes.some((p) => p.critical && !p.ok);

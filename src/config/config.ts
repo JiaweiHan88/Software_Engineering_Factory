@@ -9,6 +9,32 @@
 
 import { resolve } from "node:path";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Paperclip Configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Paperclip integration settings.
+ */
+export interface PaperclipConfig {
+  /** Paperclip server URL (e.g., "http://localhost:3100") */
+  url: string;
+  /** API key for authenticated mode (undefined = local_trusted) */
+  apiKey: string | undefined;
+  /** Organization ID in Paperclip */
+  orgId: string;
+  /** Heartbeat polling interval in milliseconds */
+  pollIntervalMs: number;
+  /** Whether Paperclip integration is enabled */
+  enabled: boolean;
+  /** Request timeout for Paperclip API calls in milliseconds */
+  timeoutMs: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main Configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * Resolved runtime configuration for the BMAD Copilot Factory.
  */
@@ -27,6 +53,8 @@ export interface BmadConfig {
   logLevel: "none" | "error" | "warning" | "info" | "debug" | "all";
   /** Project root directory */
   projectRoot: string;
+  /** Paperclip integration settings */
+  paperclip: PaperclipConfig;
 }
 
 /**
@@ -49,6 +77,14 @@ export function loadConfig(projectRoot?: string): BmadConfig {
     reviewPassLimit: Number(process.env.REVIEW_PASS_LIMIT) || 3,
     logLevel: (process.env.COPILOT_LOG_LEVEL as BmadConfig["logLevel"]) || "warning",
     projectRoot: root,
+    paperclip: {
+      url: process.env.PAPERCLIP_URL || "http://localhost:3100",
+      apiKey: process.env.PAPERCLIP_API_KEY || undefined,
+      orgId: process.env.PAPERCLIP_ORG_ID || "bmad-factory",
+      pollIntervalMs: Number(process.env.PAPERCLIP_POLL_INTERVAL_MS) || 5_000,
+      enabled: process.env.PAPERCLIP_ENABLED === "true",
+      timeoutMs: Number(process.env.PAPERCLIP_TIMEOUT_MS) || 10_000,
+    },
   };
 }
 

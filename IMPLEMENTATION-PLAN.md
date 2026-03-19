@@ -2,7 +2,23 @@
 
 **Project:** Autonomous Software Building Factory  
 **Stack:** Paperclip (orchestration) + Copilot SDK (agent runtime) + BMAD Method (methodology)  
-**Date:** March 19, 2026
+**Date:** March 19, 2026  
+**Last Updated:** March 19, 2026
+
+---
+
+## Progress Summary
+
+| Phase | Commit | Status |
+|-------|--------|--------|
+| **Phase 0** — Scaffolding | `845fc88` | ✅ Complete |
+| **Phase 1** — SDK Connectivity | `66e3bd8` | ✅ Complete |
+| **Phase 2** — BMAD Tools | `281c74c` | ✅ Complete |
+| **BMAD V6 Agents** | `31f85a9` | ✅ Complete (9 authentic agents) |
+| **Phase 3** — Orchestrator Engine | `5d8d4b8` | ✅ Complete |
+| **Phase 4** — Paperclip Integration | — | ✅ Complete |
+| **Phase 5** — MCP Server | — | 🔜 Next |
+| **Phase 6** — Quality Gates | — | ⏳ Blocked on Phase 5 |
 
 ---
 
@@ -225,6 +241,37 @@ Each tool:
 
 **Blocked by:** Y9 (Docker + Paperclip running)  
 **Your action needed:** Run `docker compose up`, confirm Paperclip UI loads
+
+#### Phase 4 — Delivery Summary
+
+**Delivered modules:**
+- `src/adapter/paperclip-client.ts` — Full HTTP client for Paperclip REST API (agents, tickets, heartbeats, status reports, orgs/goals)
+- `src/adapter/reporter.ts` — Structured status reporting back to Paperclip with audit history
+- `src/adapter/paperclip-loop.ts` — Heartbeat-driven integration loop (poll → dispatch → report)
+- `src/adapter/heartbeat-handler.ts` — Upgraded with `handlePaperclipHeartbeat()` bridging Paperclip → BMAD
+- `src/adapter/health-check.ts` — Added Paperclip connectivity probe (Probe 5)
+- `src/config/config.ts` — Extended with `PaperclipConfig` (URL, API key, org ID, poll interval, enabled flag)
+- `src/index.ts` — Added `--paperclip` CLI mode with SIGINT/SIGTERM graceful shutdown
+- `docker-compose.yml` — Enhanced with BMAD factory service, health checks, `factory` profile
+- `Dockerfile` — Multi-stage build for containerized deployment
+- `templates/presets/bmad-factory/preset.meta.json` — Enhanced with org chart, modules, Paperclip settings
+
+**CLI usage:**
+```
+pnpm start:paperclip                    # Run Paperclip integration loop
+PAPERCLIP_ENABLED=true pnpm start -- --paperclip   # Same, explicit
+docker compose --profile factory up      # Run everything in Docker
+```
+
+**Environment variables:**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PAPERCLIP_ENABLED` | `false` | Enable Paperclip integration |
+| `PAPERCLIP_URL` | `http://localhost:3100` | Paperclip server URL |
+| `PAPERCLIP_API_KEY` | *(none)* | API key (optional in local_trusted mode) |
+| `PAPERCLIP_ORG_ID` | `bmad-factory` | Organization ID |
+| `PAPERCLIP_POLL_INTERVAL_MS` | `5000` | Heartbeat poll interval (ms) |
+| `PAPERCLIP_TIMEOUT_MS` | `10000` | API request timeout (ms) |
 
 ---
 

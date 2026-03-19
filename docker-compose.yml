@@ -1,7 +1,12 @@
-# Paperclip + PostgreSQL for BMAD Copilot Factory
-# Usage: docker compose up -d
+# Paperclip + PostgreSQL + BMAD Factory
+# Usage:
+#   docker compose up -d                  — Start Paperclip + Postgres
+#   docker compose up -d bmad-factory     — Start BMAD factory alongside Paperclip
+#   docker compose logs -f paperclip      — Stream Paperclip logs
+#   docker compose logs -f bmad-factory   — Stream BMAD factory logs
 
 services:
+  # ── Paperclip Orchestrator ───────────────────────────────────────────────
   paperclip:
     image: ghcr.io/paperclipai/paperclip:latest
     ports:
@@ -12,8 +17,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3100/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     restart: unless-stopped
 
+  # ── PostgreSQL (Paperclip backend) ────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     environment:
@@ -29,5 +41,38 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # ── BMAD Copilot Factory ──────────────────────────────────────────────────
+  # Runs the Paperclip integration loop (heartbeat-driven agent dispatch).
+  # Requires Copilot CLI + SDK to be available in the container.
+  # In development, run locally instead: pnpm start -- --paperclip
+  bmad-factory:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - PAPERCLIP_ENABLED=true
+      - PAPERCLIP_URL=http://paperclip:3100
+      - PAPERCLIP_ORG_ID=bmad-factory
+      - PAPERCLIP_POLL_INTERVAL_MS=5000
+      - COPILOT_MODEL=${COPILOT_MODEL:-claude-sonnet-4.5}
+      - COPILOT_LOG_LEVEL=${COPILOT_LOG_LEVEL:-warning}
+      - COPILOT_GHE_HOST=${COPILOT_GHE_HOST:-}
+      # Pass through BYOK API keys if provided
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    volumes:
+      # Mount output directory for story artifacts
+      - ./_bmad-output:/app/_bmad-output
+      # Mount source for live development (optional)
+      - ./src:/app/src:ro
+    depends_on:
+      paperclip:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      # Only start with: docker compose --profile factory up
+      - factory
+
 volumes:
   pgdata:
+

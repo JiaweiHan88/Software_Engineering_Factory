@@ -18,7 +18,7 @@
 services:
   # ── OTel Collector — central telemetry router ────────────────────────────
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.115.0
+    image: otel/opentelemetry-collector-contrib:0.147.0
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
       - ./observability/otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
@@ -32,7 +32,7 @@ services:
 
   # ── Jaeger — distributed tracing backend + UI ────────────────────────────
   jaeger:
-    image: jaegertracing/all-in-one:1.64
+    image: jaegertracing/all-in-one:1.76.0
     environment:
       - COLLECTOR_OTLP_ENABLED=true
     ports:

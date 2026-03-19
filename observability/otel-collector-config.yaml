@@ -54,3 +54,7 @@ service:
       receivers: [otlp]
       processors: [batch, resource]
       exporters: [prometheus, debug]
+    logs:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [debug]

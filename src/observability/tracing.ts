@@ -91,7 +91,9 @@ export function initTracing(config?: Partial<TracingConfig>): void {
   provider = new NodeTracerProvider({ resource });
 
   // OTLP exporter → Jaeger/Tempo/etc.
-  const otlpExporter = new OTLPTraceExporter({ url: cfg.endpoint });
+  // Append /v1/traces — the SDK does not auto-append when `url` is passed directly
+  const tracesUrl = cfg.endpoint.replace(/\/+$/, "") + "/v1/traces";
+  const otlpExporter = new OTLPTraceExporter({ url: tracesUrl });
   provider.addSpanProcessor(new BatchSpanProcessor(otlpExporter));
 
   // Optional console exporter for debugging

@@ -77,7 +77,9 @@ export function initMetrics(config?: Partial<MetricsConfig>): void {
     [ATTR_SERVICE_VERSION]: "0.1.0",
   });
 
-  const exporter = new OTLPMetricExporter({ url: cfg.endpoint });
+  // Append /v1/metrics — the SDK does not auto-append when `url` is passed directly
+  const metricsUrl = cfg.endpoint.replace(/\/+$/, "") + "/v1/metrics";
+  const exporter = new OTLPMetricExporter({ url: metricsUrl });
   const reader = new PeriodicExportingMetricReader({
     exporter,
     exportIntervalMillis: cfg.exportIntervalMs,

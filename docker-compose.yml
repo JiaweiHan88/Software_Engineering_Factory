@@ -59,6 +59,8 @@ services:
       POSTGRES_USER: paperclip
       POSTGRES_PASSWORD: paperclip
       POSTGRES_DB: paperclip
+    ports:
+      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

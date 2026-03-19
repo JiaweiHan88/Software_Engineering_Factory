@@ -418,7 +418,7 @@ export class PaperclipClient {
   }): Promise<PaperclipIssue[]> {
     const params = new URLSearchParams();
     if (filters?.status) params.set("status", filters.status);
-    if (filters?.assigneeId) params.set("assignee_id", filters.assigneeId);
+    if (filters?.assigneeId) params.set("assigneeAgentId", filters.assigneeId);
     if (filters?.projectId) params.set("project_id", filters.projectId);
     if (filters?.goalId) params.set("goal_id", filters.goalId);
     const qs = params.toString();

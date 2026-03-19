@@ -131,7 +131,7 @@ describe("PaperclipClient", () => {
 
       expect(result.id).toBe("agent-1");
       const [url, opts] = mockFetch.mock.calls[0];
-      expect(url).toBe("http://localhost:3100/api/companies/bmad-factory/agents");
+      expect(url).toBe("http://localhost:3100/api/companies/bmad-factory/agent-hires");
       expect(opts.method).toBe("POST");
     });
 
@@ -259,7 +259,7 @@ describe("PaperclipClient", () => {
 
       const url = mockFetch.mock.calls[0][0] as string;
       expect(url).toContain("status=open");
-      expect(url).toContain("assignee_id=a1");
+      expect(url).toContain("assigneeAgentId=a1");
     });
 
     it("gets a single issue via GET /api/issues/:id", async () => {

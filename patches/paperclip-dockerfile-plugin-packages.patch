@@ -1,0 +1,42 @@
+From 4171bade59b66391d4bdbd0da9517e735fcb5848 Mon Sep 17 00:00:00 2001
+From: Jiawei Han <jiawei.han@bmw.de>
+Date: Thu, 19 Mar 2026 21:21:22 +0100
+Subject: [PATCH] fix(docker): add plugin workspace packages and plugin-sdk
+ build step
+
+The Dockerfile was missing COPY lines for the 6 plugin-* workspace
+packages, causing pnpm install to fail with unresolved workspace
+dependencies. Also added the plugin-sdk build step before the server
+build since @paperclipai/server depends on it at compile time.
+---
+ Dockerfile | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/Dockerfile b/Dockerfile
+index 014113e..ed07187 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -20,6 +20,12 @@ COPY packages/adapters/gemini-local/package.json packages/adapters/gemini-local/
+ COPY packages/adapters/openclaw-gateway/package.json packages/adapters/openclaw-gateway/
+ COPY packages/adapters/opencode-local/package.json packages/adapters/opencode-local/
+ COPY packages/adapters/pi-local/package.json packages/adapters/pi-local/
++COPY packages/plugins/sdk/package.json packages/plugins/sdk/
++COPY packages/plugins/create-paperclip-plugin/package.json packages/plugins/create-paperclip-plugin/
++COPY packages/plugins/examples/plugin-authoring-smoke-example/package.json packages/plugins/examples/plugin-authoring-smoke-example/
++COPY packages/plugins/examples/plugin-hello-world-example/package.json packages/plugins/examples/plugin-hello-world-example/
++COPY packages/plugins/examples/plugin-file-browser-example/package.json packages/plugins/examples/plugin-file-browser-example/
++COPY packages/plugins/examples/plugin-kitchen-sink-example/package.json packages/plugins/examples/plugin-kitchen-sink-example/
+ 
+ RUN pnpm install --frozen-lockfile
+ 
+@@ -28,6 +34,7 @@ WORKDIR /app
+ COPY --from=deps /app /app
+ COPY . .
+ RUN pnpm --filter @paperclipai/ui build
++RUN pnpm --filter @paperclipai/plugin-sdk build
+ RUN pnpm --filter @paperclipai/server build
+ RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
+ 
+-- 
+2.50.1 (Apple Git-155)
+

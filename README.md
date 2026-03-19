@@ -85,6 +85,7 @@ open http://localhost:16686             # Jaeger trace explorer
 ### Run with Paperclip
 
 ```bash
+./scripts/setup-paperclip.sh            # Clone Paperclip + apply local patches
 docker compose up -d                    # Start Paperclip + PostgreSQL
 pnpm start:paperclip                    # Run inbox-polling integration loop
 # Alternative (no Docker):  npx paperclipai onboard --yes

@@ -1,6 +1,6 @@
 # Paperclip + PostgreSQL + BMAD Factory
 # Usage:
-#   1. Clone Paperclip:  git clone https://github.com/paperclipai/paperclip.git ../paperclip
+#   1. Setup Paperclip:  ./scripts/setup-paperclip.sh   (clones + applies patches)
 #   2. Start stack:       docker compose up -d
 #   3. Start factory:     docker compose --profile factory up -d
 #   4. Stream logs:       docker compose logs -f paperclip
@@ -11,8 +11,11 @@
 # Paperclip API: http://localhost:3100/api  (no version prefix)
 #
 # Prerequisites:
-#   - Paperclip source cloned at ../paperclip (relative to this repo)
+#   - Paperclip source at ../paperclip (run setup-paperclip.sh or clone manually)
 #   - BETTER_AUTH_SECRET must be set (e.g. export BETTER_AUTH_SECRET=$(openssl rand -hex 32))
+#
+# Patches:
+#   Local Dockerfile patches are in patches/ — see patches/README.md
 
 services:
   # ── Paperclip Orchestrator ───────────────────────────────────────────────

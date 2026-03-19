@@ -119,26 +119,57 @@ export class SprintRunner {
 
     const processCycle = async () => {
       for (const story of actionable) {
-        try {
-          const advanced = await traceStoryProcessing(
-            story.id,
-            this.nextPhase(story) ?? "unknown",
-            async (span) => {
-              const result = await this.advanceStory(story, { onDelta, onEvent, live });
-              recordStoryProcessed(story.id, this.nextPhase(story) ?? "unknown");
-              if (result) {
-                recordStoryDone(story.id);
-                span.setAttribute("story.done", true);
+        // Inner loop: keep advancing the story through phases until it
+        // reaches 'done', has no next phase, or a phase fails.
+        // This ensures ready-for-dev → dev-story → code-review → done
+        // all happen in a single sprint cycle.
+        let storyDone = false;
+        let currentStory = story;
+        const MAX_PHASES = 5; // safety limit to prevent infinite loops
+        let phaseCount = 0;
+
+        while (!storyDone && phaseCount < MAX_PHASES) {
+          phaseCount++;
+          const phase = this.nextPhase(currentStory);
+          if (!phase) break;
+
+          try {
+            const advanced = await traceStoryProcessing(
+              currentStory.id,
+              phase,
+              async (span) => {
+                const result = await this.advanceStory(currentStory, { onDelta, onEvent, live });
+                recordStoryProcessed(currentStory.id, phase);
+                if (result) {
+                  recordStoryDone(currentStory.id);
+                  span.setAttribute("story.done", true);
+                }
+                return result;
+              },
+            );
+
+            if (advanced) {
+              storyDone = true;
+            } else {
+              // Re-read the story status to check if it progressed
+              const refreshed = await readSprintStatus(this.config.sprintStatusPath);
+              const refreshedStory = refreshed.sprint.stories.find((s) => s.id === story.id);
+              if (!refreshedStory || refreshedStory.status === currentStory.status) {
+                // Status didn't change — story is stuck or failed; stop advancing
+                break;
               }
-              return result;
-            },
-          );
-          if (advanced) doneCount++;
-        } catch (err) {
-          const errorMsg = err instanceof Error ? err.message : String(err);
-          onEvent?.({ type: "story-failed", storyId: story.id, error: errorMsg });
-          log.error("Story processing failed", { storyId: story.id }, err instanceof Error ? err : undefined);
+              // Status changed — update in-memory story and loop to next phase
+              currentStory = refreshedStory;
+            }
+          } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            onEvent?.({ type: "story-failed", storyId: story.id, error: errorMsg });
+            log.error("Story processing failed", { storyId: story.id }, err instanceof Error ? err : undefined);
+            break;
+          }
         }
+
+        if (storyDone) doneCount++;
       }
     };
 

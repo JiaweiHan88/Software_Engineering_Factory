@@ -21,6 +21,8 @@ import { readSprintStatus } from "../tools/sprint-status.js";
 import type { SprintStatusData, SprintStory } from "../tools/sprint-status.js";
 import type { BmadConfig } from "../config/config.js";
 import type { AgentDispatcher, DispatchResult, WorkPhase } from "./agent-dispatcher.js";
+import { ReviewOrchestrator } from "../quality-gates/review-orchestrator.js";
+import type { ReviewOrchestratorEvent } from "../quality-gates/review-orchestrator.js";
 
 /**
  * Sprint runner lifecycle events.
@@ -32,7 +34,8 @@ export type SprintEvent =
   | { type: "story-escalated"; storyId: string; reason: string }
   | { type: "story-failed"; storyId: string; error: string }
   | { type: "sprint-complete"; storiesProcessed: number; storiesDone: number }
-  | { type: "sprint-idle"; message: string };
+  | { type: "sprint-idle"; message: string }
+  | { type: "quality-gate"; storyId: string; event: ReviewOrchestratorEvent };
 
 /**
  * Callback for sprint events.
@@ -61,10 +64,12 @@ export interface SprintRunOptions {
 export class SprintRunner {
   private dispatcher: AgentDispatcher;
   private config: BmadConfig;
+  private reviewOrchestrator: ReviewOrchestrator;
 
   constructor(dispatcher: AgentDispatcher, config: BmadConfig) {
     this.dispatcher = dispatcher;
     this.config = config;
+    this.reviewOrchestrator = new ReviewOrchestrator(dispatcher, config);
   }
 
   /**
@@ -163,7 +168,39 @@ export class SprintRunner {
       return false;
     }
 
-    // Dispatch to the appropriate agent
+    // ── Quality Gate: use ReviewOrchestrator for code-review phase ──
+    if (phase === "code-review") {
+      const orchestrationResult = await this.reviewOrchestrator.run({
+        storyId: story.id,
+        storyTitle: story.title,
+        onDelta,
+        onEvent: (reviewEvent) => {
+          onEvent?.({ type: "quality-gate", storyId: story.id, event: reviewEvent });
+        },
+      });
+
+      const fakeResult: DispatchResult = {
+        success: orchestrationResult.approved,
+        response: orchestrationResult.summary,
+        agentName: "bmad-qa",
+        sessionId: `review-${story.id}`,
+        error: orchestrationResult.escalated ? orchestrationResult.summary : undefined,
+      };
+
+      onEvent?.({ type: "story-complete", storyId: story.id, phase, result: fakeResult });
+
+      if (orchestrationResult.escalated) {
+        onEvent?.({
+          type: "story-escalated",
+          storyId: story.id,
+          reason: orchestrationResult.summary,
+        });
+      }
+
+      return orchestrationResult.approved;
+    }
+
+    // ── Standard dispatch for non-review phases ──
     const result = await this.dispatcher.dispatch(
       {
         id: `${story.id}-${phase}`,

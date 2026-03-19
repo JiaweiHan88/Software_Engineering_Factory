@@ -21,6 +21,7 @@ import {
   codeReviewTool,
   codeReviewResultTool,
   sprintStatusTool,
+  qualityGateEvaluateTool,
 } from "../tools/index.js";
 import type { Tool } from "../tools/types.js";
 import type { SessionManager } from "./session-manager.js";
@@ -122,7 +123,7 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
     "code-review": {
       agentName: "bmad-qa",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [codeReviewTool, codeReviewResultTool, sprintStatusTool] as Tool<any>[],
+      tools: [codeReviewTool, codeReviewResultTool, qualityGateEvaluateTool, sprintStatusTool] as Tool<any>[],
       buildPrompt: (item, config) => {
         const storyPath = resolve(config.outputDir, "stories", `${item.storyId}.md`);
         return [

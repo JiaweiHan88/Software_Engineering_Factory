@@ -25,6 +25,7 @@ import { PaperclipLoop } from "./adapter/paperclip-loop.js";
 import { checkHealth, formatHealthResult } from "./adapter/health-check.js";
 import type { SprintEvent } from "./adapter/sprint-runner.js";
 import type { PaperclipLoopEvent } from "./adapter/paperclip-loop.js";
+import type { ReviewOrchestratorEvent } from "./quality-gates/review-orchestrator.js";
 import type { WorkPhase } from "./adapter/agent-dispatcher.js";
 
 /**
@@ -52,6 +53,44 @@ function logEvent(event: SprintEvent): void {
       break;
     case "sprint-idle":
       console.log(`\n💤 ${event.message}`);
+      break;
+    case "quality-gate":
+      logQualityGateEvent(event.storyId, event.event);
+      break;
+  }
+}
+
+/**
+ * Event handler that logs quality gate review events to console.
+ */
+function logQualityGateEvent(storyId: string, event: ReviewOrchestratorEvent): void {
+  switch (event.type) {
+    case "review-start":
+      console.log(`  🔍 ${storyId} — review pass ${event.passNumber} starting`);
+      break;
+    case "review-dispatched":
+      console.log(`  📤 ${storyId} — review dispatched to ${event.agentName}`);
+      break;
+    case "gate-evaluated":
+      console.log(`  🚦 ${storyId} — gate verdict: ${event.result.verdict} (blocking: ${event.result.blockingCount}, advisory: ${event.result.advisoryCount}, score: ${event.result.severityScore})`);
+      break;
+    case "fix-start":
+      console.log(`  🔧 ${storyId} — fixing ${event.findingCount} blocking finding(s)`);
+      break;
+    case "fix-dispatched":
+      console.log(`  📤 ${storyId} — fix dispatched to ${event.agentName}`);
+      break;
+    case "fix-complete":
+      console.log(`  ✅ ${storyId} — fixes applied for pass ${event.passNumber}`);
+      break;
+    case "review-approved":
+      console.log(`  🎉 ${storyId} — APPROVED after ${event.totalPasses} pass(es)`);
+      break;
+    case "review-escalated":
+      console.log(`  ⚠️  ${storyId} — ESCALATED: ${event.reason}`);
+      break;
+    case "review-error":
+      console.log(`  ❌ ${storyId} — review error: ${event.error}`);
       break;
   }
 }

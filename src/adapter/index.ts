@@ -47,3 +47,12 @@ export type {
   PaperclipLoopEventHandler,
   PaperclipLoopOptions,
 } from "./paperclip-loop.js";
+
+// Re-export quality gates for convenience
+export { ReviewOrchestrator } from "../quality-gates/review-orchestrator.js";
+export type {
+  ReviewOrchestrationOptions,
+  ReviewOrchestrationResult,
+  ReviewOrchestratorEvent,
+  ReviewOrchestratorEventHandler,
+} from "../quality-gates/review-orchestrator.js";

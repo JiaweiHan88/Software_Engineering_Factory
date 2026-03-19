@@ -16,11 +16,15 @@ export type { Tool, ToolHandler } from "./types.js";
 export { readSprintStatus, writeSprintStatus } from "./sprint-status.js";
 export type { SprintStatusData, SprintStory } from "./sprint-status.js";
 
+// Re-export quality gate tool
+export { qualityGateEvaluateTool } from "../quality-gates/tool.js";
+
 import type { Tool } from "./types.js";
 import { createStoryTool } from "./create-story.js";
 import { devStoryTool } from "./dev-story.js";
 import { codeReviewTool, codeReviewResultTool } from "./code-review.js";
 import { sprintStatusTool } from "./sprint-status.js";
+import { qualityGateEvaluateTool } from "../quality-gates/tool.js";
 
 /**
  * All BMAD tools, ready to pass to CopilotClient.createSession({ tools }).
@@ -32,4 +36,5 @@ export const allTools: Tool<any>[] = [
   codeReviewTool,
   codeReviewResultTool,
   sprintStatusTool,
+  qualityGateEvaluateTool,
 ];

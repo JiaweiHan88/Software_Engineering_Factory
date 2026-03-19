@@ -18,7 +18,8 @@
 | **Phase 3** — Orchestrator Engine | `5d8d4b8` | ✅ Complete |
 | **Phase 4** — Paperclip Integration | — | ✅ Complete |
 | **Phase 5** — MCP Server | — | ✅ Complete |
-| **Phase 6** — Quality Gates | — | 🔜 Next |
+| **Phase 6** — Quality Gates | — | ✅ Complete |
+| **Phase 7** — Production Hardening | — | 🔜 Next |
 
 ---
 
@@ -344,6 +345,80 @@ tsx src/mcp/bmad-sprint-server/index.ts   # Run directly
 
 **Blocked by:** Phase 4  
 **Your action needed:** None
+
+#### Phase 6 — Delivery Summary
+
+**Delivered modules:**
+
+| Module | File | Description |
+|--------|------|-------------|
+| Quality Gate Types | `src/quality-gates/types.ts` | Severity levels (LOW→CRITICAL), structured findings, gate verdicts (PASS/FAIL/ESCALATE), review history, orchestrator actions |
+| Quality Gate Engine | `src/quality-gates/engine.ts` | Pure logic: severity analysis, weighted scoring, gate evaluation, verdict decision, formatted reports |
+| Review Orchestrator | `src/quality-gates/review-orchestrator.ts` | Full review loop: dispatch review → parse findings → evaluate gate → fix or approve → persist history |
+| Quality Gate Tool | `src/quality-gates/tool.ts` | Copilot SDK `defineTool("quality_gate_evaluate")` — structured findings → verdict |
+| Barrel Export | `src/quality-gates/index.ts` | Module barrel export for all quality gate types, engine, orchestrator, and tool |
+
+**Updated modules:**
+
+| Module | Changes |
+|--------|---------|
+| `src/tools/code-review.ts` | Review protocol now instructs agents to use `quality_gate_evaluate` with structured findings; added severity guide and finding format reference |
+| `src/tools/index.ts` | Added `qualityGateEvaluateTool` to `allTools` array and exports |
+| `src/adapter/agent-dispatcher.ts` | Added `qualityGateEvaluateTool` to code-review phase tool list |
+| `src/adapter/sprint-runner.ts` | Code-review phase now routes through `ReviewOrchestrator` instead of plain dispatch; added `quality-gate` event type |
+| `src/adapter/index.ts` | Re-exports `ReviewOrchestrator` and orchestration types |
+| `src/index.ts` | Added `logQualityGateEvent()` handler for all review orchestrator events |
+| `src/skills/quality-gates/skill.md` | Enhanced with structured finding format, category reference, severity weights, score computation |
+
+**Quality Gate Flow:**
+```
+story status = "review"
+  → SprintRunner detects code-review phase
+  → ReviewOrchestrator.run() takes over:
+    ┌─ Loop (max 3 passes) ────────────────────────────┐
+    │  1. Dispatch code-review to bmad-qa agent         │
+    │  2. Agent analyzes files, collects findings       │
+    │  3. Agent calls quality_gate_evaluate tool        │
+    │  4. Engine evaluates: severity scores, blocking   │
+    │     count, advisory count                         │
+    │  5. Verdict:                                      │
+    │     • PASS  → story → done ✅                     │
+    │     • FAIL  → dispatch fix to bmad-dev → loop ↩  │
+    │     • ESCALATE → human intervention ⚠️            │
+    └──────────────────────────────────────────────────┘
+```
+
+**Severity Scoring:**
+| Severity | Weight | Blocks Merge |
+|----------|--------|-------------|
+| LOW | 1 | No |
+| MEDIUM | 3 | No |
+| HIGH | 7 | Yes |
+| CRITICAL | 15 | Yes |
+
+**Finding Categories:** correctness, security, performance, error-handling, type-safety, maintainability, testing, documentation, style
+
+**Review History Persistence:**
+- Each story's review history is saved to `_bmad-output/review-history/{story_id}.review.yaml`
+- Survives process restarts — orchestrator resumes from last completed pass
+- Full audit trail: findings, verdicts, scores, fix agents, timestamps
+
+**New Copilot SDK Tool:**
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `quality_gate_evaluate` | `story_id`, `findings[]`, `reviewer_notes?` | Evaluates structured findings array against quality gate, returns verdict with severity score |
+
+**Event Types Added:**
+- `review-start` — review pass beginning
+- `review-dispatched` — review sent to agent
+- `gate-evaluated` — gate verdict computed
+- `fix-start` — fix dispatching for blocking findings
+- `fix-dispatched` — fix sent to developer agent
+- `fix-complete` — fixes applied
+- `review-approved` — story passed quality gate
+- `review-escalated` — story needs human intervention
+- `review-error` — review dispatch failed
 
 ---
 

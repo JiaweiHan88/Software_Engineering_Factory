@@ -263,6 +263,7 @@ export class AgentDispatcher {
             tools: phaseConfig.tools,
             skillDirectories: this.skillDirs,
             model: modelSelection.model,
+            systemMessage: this.config.agentSystemMessage,
           });
 
           // Track story association
@@ -339,6 +340,7 @@ export class AgentDispatcher {
         allAgents,
         tools: tools ?? allTools,
         skillDirectories: this.skillDirs,
+        systemMessage: this.config.agentSystemMessage,
       });
 
       const response = await this.sessionManager.sendAndWait(

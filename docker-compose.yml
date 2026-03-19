@@ -1,0 +1,33 @@
+# Paperclip + PostgreSQL for BMAD Copilot Factory
+# Usage: docker compose up -d
+
+services:
+  paperclip:
+    image: ghcr.io/paperclipai/paperclip:latest
+    ports:
+      - "3100:3100"
+    environment:
+      - DATABASE_URL=postgresql://paperclip:paperclip@postgres:5432/paperclip
+      - NODE_ENV=production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: paperclip
+      POSTGRES_PASSWORD: paperclip
+      POSTGRES_DB: paperclip
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperclip"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pgdata:

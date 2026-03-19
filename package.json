@@ -1,0 +1,31 @@
+{
+  "name": "bmad-copilot-factory",
+  "version": "0.1.0",
+  "description": "Autonomous Software Building Factory — Paperclip + Copilot SDK + BMAD Method",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "sandbox:hello": "tsx src/sandbox/hello-copilot.ts",
+    "sandbox:agent": "tsx src/sandbox/test-agent.ts",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "^0.1.32"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "eslint": "^9.0.0"
+  },
+  "license": "MIT"
+}

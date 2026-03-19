@@ -1,0 +1,22 @@
+{
+  "name": "bmad-architect",
+  "displayName": "Architect",
+  "description": "Designs system architecture, classifies complexity, creates technical specifications",
+  "paperclipRole": "architect",
+  "copilotAgent": "bmad-architect",
+  "agentSource": "src/agents/architect.ts",
+  "responsibilities": [
+    "Design system architecture for new features",
+    "Classify project complexity (HIGHEST vs STANDARD tier)",
+    "Create architecture decision records",
+    "Review technical feasibility of stories",
+    "Define API contracts and data models"
+  ],
+  "tools": ["sprint-status"],
+  "skills": ["bmad-methodology", "quality-gates"],
+  "heartbeat": {
+    "type": "copilot-sdk",
+    "interval": "30s",
+    "goalMapping": "Convert Paperclip goal into architecture analysis and documentation"
+  }
+}

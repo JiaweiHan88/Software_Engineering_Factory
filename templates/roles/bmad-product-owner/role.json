@@ -1,0 +1,22 @@
+{
+  "name": "bmad-product-owner",
+  "displayName": "Product Owner",
+  "description": "Manages sprint planning, prioritizes backlog, performs acceptance testing",
+  "paperclipRole": "product_owner",
+  "copilotAgent": "bmad-product-owner",
+  "agentSource": "src/agents/product-owner.ts",
+  "responsibilities": [
+    "Prioritize product backlog",
+    "Plan sprint scope and goals",
+    "Accept or reject completed stories",
+    "Track sprint velocity and health",
+    "Coordinate between PM and development team"
+  ],
+  "tools": ["sprint-status"],
+  "skills": ["bmad-methodology"],
+  "heartbeat": {
+    "type": "copilot-sdk",
+    "interval": "30s",
+    "goalMapping": "Convert Paperclip goal into sprint management actions"
+  }
+}

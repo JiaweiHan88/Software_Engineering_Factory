@@ -1,0 +1,22 @@
+{
+  "name": "bmad-developer",
+  "displayName": "Developer",
+  "description": "Implements stories using BMAD dev-story process — runs exactly once per story",
+  "paperclipRole": "engineer",
+  "copilotAgent": "bmad-developer",
+  "agentSource": "src/agents/developer.ts",
+  "responsibilities": [
+    "Implement user stories from ready-for-dev backlog",
+    "Write production code with tests",
+    "Follow BMAD coding standards (JSDoc, types, error handling)",
+    "Run dev-story exactly once per story",
+    "Move story status to review when complete"
+  ],
+  "tools": ["dev-story", "sprint-status"],
+  "skills": ["bmad-methodology", "quality-gates"],
+  "heartbeat": {
+    "type": "copilot-sdk",
+    "interval": "30s",
+    "goalMapping": "Convert Paperclip goal into dev-story tool invocation for assigned story"
+  }
+}

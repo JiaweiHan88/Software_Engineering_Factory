@@ -1,0 +1,19 @@
+{
+  "name": "bmad-ceo",
+  "displayName": "CEO",
+  "description": "Strategic leader — sets company vision, defines goals, allocates resources",
+  "paperclipRole": "ceo",
+  "copilotAgent": null,
+  "notes": "CEO is Paperclip-native. No custom Copilot agent needed — Paperclip manages CEO goal-setting and delegation directly.",
+  "responsibilities": [
+    "Define company vision and product strategy",
+    "Set high-level goals for each sprint",
+    "Allocate budget and resources across roles",
+    "Approve major architectural decisions",
+    "Escalation point for unresolved blockers"
+  ],
+  "heartbeat": {
+    "type": "paperclip-native",
+    "interval": "60s"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "name": "bmad-factory",
+  "displayName": "BMAD Copilot Factory",
+  "description": "Autonomous software building company using BMAD methodology with Copilot SDK agents",
+  "version": "0.1.0",
+  "author": "BMAD Copilot Factory",
+  "roles": [
+    {
+      "name": "ceo",
+      "template": "../../roles/bmad-ceo/role.json",
+      "required": true
+    },
+    {
+      "name": "product-manager",
+      "template": "../../roles/bmad-product-manager/role.json",
+      "required": true
+    },
+    {
+      "name": "architect",
+      "template": "../../roles/bmad-architect/role.json",
+      "required": true
+    },
+    {
+      "name": "product-owner",
+      "template": "../../roles/bmad-product-owner/role.json",
+      "required": true
+    },
+    {
+      "name": "developer",
+      "template": "../../roles/bmad-developer/role.json",
+      "required": true
+    },
+    {
+      "name": "code-reviewer",
+      "template": "../../roles/bmad-code-reviewer/role.json",
+      "required": true
+    }
+  ],
+  "settings": {
+    "heartbeatIntervalMs": 30000,
+    "maxConcurrentAgents": 2,
+    "reviewPassLimit": 3,
+    "methodology": "bmad-v6",
+    "defaultModel": "claude-sonnet-4.5",
+    "qualityGate": "adversarial"
+  },
+  "bootstrapSteps": [
+    "Create sprint-status.yaml with sprint 1",
+    "Create docs/ directory for architecture artifacts",
+    "Initialize BMAD story templates in stories/",
+    "Assign CEO goal: 'Define product vision and initial epic'"
+  ]
+}

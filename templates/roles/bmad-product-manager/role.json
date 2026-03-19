@@ -1,0 +1,22 @@
+{
+  "name": "bmad-product-manager",
+  "displayName": "Product Manager",
+  "description": "Creates user stories from requirements using BMAD create-story process",
+  "paperclipRole": "product_manager",
+  "copilotAgent": "bmad-pm",
+  "agentSource": "src/agents/product-manager.ts",
+  "responsibilities": [
+    "Gather and clarify requirements",
+    "Create well-structured user stories with acceptance criteria",
+    "Maintain the product backlog",
+    "Ensure stories follow BMAD story template",
+    "Collaborate with Architect on technical feasibility"
+  ],
+  "tools": ["create-story", "sprint-status"],
+  "skills": ["bmad-methodology"],
+  "heartbeat": {
+    "type": "copilot-sdk",
+    "interval": "30s",
+    "goalMapping": "Convert Paperclip goal into create-story tool invocation"
+  }
+}

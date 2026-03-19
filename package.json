@@ -19,11 +19,13 @@
     "sandbox:agent": "tsx src/sandbox/test-agent.ts",
     "sandbox:tools": "tsx src/sandbox/test-tools.ts",
     "sandbox:orchestrator": "tsx src/sandbox/test-orchestrator.ts",
+    "mcp:sprint": "tsx src/mcp/bmad-sprint-server/index.ts",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@github/copilot-sdk": "^0.1.32",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "js-yaml": "^4.1.1",
     "zod": "^4.3.6"
   },

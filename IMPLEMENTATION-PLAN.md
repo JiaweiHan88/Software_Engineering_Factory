@@ -17,8 +17,8 @@
 | **BMAD V6 Agents** | `31f85a9` | ✅ Complete (9 authentic agents) |
 | **Phase 3** — Orchestrator Engine | `5d8d4b8` | ✅ Complete |
 | **Phase 4** — Paperclip Integration | — | ✅ Complete |
-| **Phase 5** — MCP Server | — | 🔜 Next |
-| **Phase 6** — Quality Gates | — | ⏳ Blocked on Phase 5 |
+| **Phase 5** — MCP Server | — | ✅ Complete |
+| **Phase 6** — Quality Gates | — | 🔜 Next |
 
 ---
 
@@ -290,6 +290,41 @@ docker compose --profile factory up      # Run everything in Docker
 
 **Blocked by:** Phase 3  
 **Your action needed:** None
+
+#### Phase 5 — Delivery Summary
+
+**Delivered modules:**
+- `src/mcp/bmad-sprint-server/index.ts` — MCP server entry point with stdio transport, protocol handshake, tool registration
+- `src/mcp/bmad-sprint-server/tools.ts` — 5 MCP tool handler implementations reusing existing sprint-status utilities
+- `src/mcp/index.ts` — Barrel exports for MCP module
+- `.vscode/mcp.json` — VS Code / Copilot MCP server discovery configuration
+
+**Dependencies added:**
+- `@modelcontextprotocol/sdk` ^1.27.1
+
+**MCP tools registered:**
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `get_sprint_status` | *(none)* | Returns sprint number, goal, all stories with status counts |
+| `get_next_story` | *(none)* | Finds first `ready-for-dev` story, includes full markdown |
+| `update_story_status` | `story_id`, `new_status`, `assigned?`, `increment_review_pass?` | Moves story through lifecycle with transition validation |
+| `get_architecture_docs` | `include_file_list?` | Reads `docs/architecture.md`, optionally lists all docs |
+| `get_story_details` | `story_id` | Sprint metadata + full story markdown content |
+
+**Lifecycle transition validation:**
+- Forward: `backlog → ready-for-dev → in-progress → review → done`
+- Rework: `review → in-progress` (failed code review)
+- Reopen: `done → review` (re-review)
+- Backward: `ready-for-dev → backlog`, `in-progress → ready-for-dev`
+
+**CLI usage:**
+```
+pnpm mcp:sprint                          # Run MCP server (stdio)
+tsx src/mcp/bmad-sprint-server/index.ts   # Run directly
+```
+
+**Verified:** TypeScript compiles clean, MCP initialize handshake succeeds, `tools/list` returns all 5 tools with correct JSON schemas, `tools/call` for `get_sprint_status` and `get_next_story` return correct data from `_bmad-output/sprint-status.yaml`.
 
 ---
 

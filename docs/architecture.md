@@ -99,7 +99,11 @@ src/
 │   ├── bmad-methodology/skill.md
 │   └── quality-gates/skill.md
 │
-├── mcp/             # MCP server definitions (Phase 5)
+├── mcp/             # MCP server definitions
+│   ├── index.ts     # Barrel exports
+│   └── bmad-sprint-server/
+│       ├── index.ts # stdio MCP server entry point
+│       └── tools.ts # 5 tool handlers (sprint, stories, arch docs)
 │
 ├── config/          # Runtime configuration
 │

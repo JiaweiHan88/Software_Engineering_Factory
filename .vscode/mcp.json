@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "bmad-sprint-server": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["tsx", "src/mcp/bmad-sprint-server/index.ts"],
+      "env": {}
+    }
+  }
+}

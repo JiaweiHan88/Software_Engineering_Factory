@@ -11,6 +11,7 @@
  */
 
 import { resolve } from "node:path";
+import { existsSync } from "node:fs";
 import type { BmadConfig } from "../config/config.js";
 import { getAgent, allAgents } from "../agents/registry.js";
 import {
@@ -189,11 +190,11 @@ export class AgentDispatcher {
     this.config = config;
     this.modelStrategy = loadModelStrategyConfig();
 
-    // Resolve skill directories — both our custom skills and BMAD's .github/skills
+    // Resolve skill directories — filter to only directories that exist on disk
     this.skillDirs = [
       resolve(config.projectRoot, "src/skills"),
       resolve(config.projectRoot, ".github/skills"),
-    ];
+    ].filter((dir) => existsSync(dir));
   }
 
   /**
@@ -269,11 +270,11 @@ export class AgentDispatcher {
             this.sessionManager.setSessionStory(sessionId, item.storyId);
           }
 
-          // Send the prompt
+          // Send the prompt (5 min timeout — agent may spawn sub-agents with many tool calls)
           const response = await this.sessionManager.sendAndWait(
             sessionId,
             prompt,
-            120_000,
+            300_000,
             onDelta,
           );
 
@@ -343,7 +344,7 @@ export class AgentDispatcher {
       const response = await this.sessionManager.sendAndWait(
         sessionId,
         `@${agentName} ${prompt}`,
-        120_000,
+        300_000,
         onDelta,
       );
 

@@ -54,9 +54,31 @@ export const devStoryTool = defineTool("dev_story", {
     }
 
     if (story.status === "in-progress") {
+      // Allow re-entry — the story may have been left in-progress by a previous
+      // failed/timed-out run. Read the story content and let the agent continue.
+      let storyContent: string;
+      try {
+        storyContent = await readFile(args.story_file_path, "utf-8");
+      } catch {
+        return {
+          textResultForLlm: `Error: Could not read story file at '${args.story_file_path}'. Verify the path is correct.`,
+          resultType: "failure" as const,
+        };
+      }
       return {
-        textResultForLlm: `Error: Story ${args.story_id} is already in-progress. BMAD rule: dev_story runs exactly ONCE per story. If you need to continue, read the story file directly.`,
-        resultType: "failure" as const,
+        textResultForLlm: [
+          `=== DEV-STORY: ${args.story_id} (RESUMING) ===`,
+          `Status: already in-progress (resuming from previous attempt)`,
+          `Assigned to: ${story.assigned ?? "bmad-developer"}`,
+          ``,
+          `INSTRUCTIONS: Implement ALL tasks and acceptance criteria below.`,
+          `After completing implementation, use sprint_status tool to update status to 'review'.`,
+          ``,
+          `--- STORY CONTENT ---`,
+          storyContent,
+          `--- END STORY CONTENT ---`,
+        ].join("\n"),
+        resultType: "success" as const,
       };
     }
 

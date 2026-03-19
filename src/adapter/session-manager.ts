@@ -184,7 +184,7 @@ export class SessionManager {
       customAgents,
       tools,
       infiniteSessions: { enabled: false },
-      workingDirectory: this.config.projectRoot,
+      workingDirectory: this.config.targetProjectRoot,
     };
 
     // Add skill directories if provided
@@ -264,7 +264,7 @@ export class SessionManager {
           onPermissionRequest: approveAll,
           customAgents,
           tools: opts.tools,
-          workingDirectory: this.config.projectRoot,
+          workingDirectory: this.config.targetProjectRoot,
           ...(opts.skillDirectories ? { skillDirectories: opts.skillDirectories } : {}),
           ...(opts.systemMessage ? { systemMessage: { mode: "append", content: opts.systemMessage } } : {}),
         };

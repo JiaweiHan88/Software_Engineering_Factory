@@ -159,8 +159,8 @@ async function checkPaperclip(config: BmadConfig): Promise<HealthProbe> {
 
   const client = new PaperclipClient({
     baseUrl: config.paperclip.url,
-    apiKey: config.paperclip.apiKey,
-    orgId: config.paperclip.orgId,
+    agentApiKey: config.paperclip.agentApiKey,
+    companyId: config.paperclip.companyId,
     timeoutMs: 5_000,
   });
 

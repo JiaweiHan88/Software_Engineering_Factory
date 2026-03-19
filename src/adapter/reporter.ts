@@ -1,19 +1,21 @@
 /**
- * Paperclip Reporter — Structured Status Reporting
+ * Paperclip Reporter — Structured Status Reporting via Issue Comments
  *
- * Converts BMAD DispatchResults and sprint events into Paperclip-compatible
- * status reports and pushes them back to the Paperclip API.
+ * Aligned with real Paperclip API:
+ * - No /reports endpoint (was invented)
+ * - Results flow back through issue comments: POST /api/issues/:id/comments
+ * - Issue status updates via: PATCH /api/issues/:id
  *
  * Responsibilities:
- * - Map BMAD lifecycle events → Paperclip ticket status updates
- * - Map agent results → Paperclip status reports with artifacts
+ * - Map BMAD lifecycle events → Paperclip issue comments
+ * - Map agent results → issue status updates
  * - Buffer and batch minor updates to reduce API traffic
  * - Log all reports locally for audit trail
  *
  * @module adapter/reporter
  */
 
-import type { PaperclipClient, PaperclipStatusReport, PaperclipTicket } from "./paperclip-client.js";
+import type { PaperclipClient, PaperclipIssue } from "./paperclip-client.js";
 import type { DispatchResult } from "./agent-dispatcher.js";
 import type { HeartbeatResult } from "./heartbeat-handler.js";
 import type { SprintEvent } from "./sprint-runner.js";
@@ -29,8 +31,8 @@ const log = Logger.child("reporter");
 export interface ReportLogEntry {
   timestamp: string;
   agentId: string;
-  ticketId: string;
-  status: PaperclipStatusReport["status"];
+  issueId: string;
+  status: string;
   message: string;
   success: boolean;
   error?: string;
@@ -41,13 +43,13 @@ export interface ReportLogEntry {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Reports BMAD processing results back to Paperclip.
+ * Reports BMAD processing results back to Paperclip via issue comments.
  *
  * Usage:
  * ```ts
  * const reporter = new PaperclipReporter(paperclipClient);
- * await reporter.reportHeartbeatResult("bmad-dev", "T-1", heartbeatResult);
- * await reporter.reportDispatchResult("bmad-dev", "T-1", dispatchResult);
+ * await reporter.reportHeartbeatResult("bmad-dev", "issue-1", heartbeatResult);
+ * await reporter.reportDispatchResult("bmad-dev", "issue-1", dispatchResult);
  * ```
  */
 export class PaperclipReporter {
@@ -63,36 +65,36 @@ export class PaperclipReporter {
   // ── High-Level Reporting Methods ──────────────────────────────────────
 
   /**
-   * Report the result of processing a Paperclip heartbeat.
+   * Report the result of processing a Paperclip issue.
    *
-   * @param agentId - The BMAD agent that processed the heartbeat
-   * @param ticketId - The Paperclip ticket ID
+   * Posts a comment to the Paperclip issue with the result details,
+   * and updates the issue status if the work is completed or blocked.
+   *
+   * @param agentId - The BMAD agent that processed the issue
+   * @param issueId - The Paperclip issue ID
    * @param result - HeartbeatResult from handleHeartbeat()
    */
   async reportHeartbeatResult(
     agentId: string,
-    ticketId: string,
+    issueId: string,
     result: HeartbeatResult,
   ): Promise<void> {
-    const statusMap: Record<HeartbeatResult["status"], PaperclipStatusReport["status"]> = {
-      working: "working",
-      completed: "completed",
-      stalled: "failed",
-      "needs-human": "needs-human",
+    // Post a comment to the issue with the status
+    const statusEmoji: Record<HeartbeatResult["status"], string> = {
+      working: "🔄",
+      completed: "✅",
+      stalled: "❌",
+      "needs-human": "⚠️",
     };
 
-    await this.sendReport({
-      agentId,
-      ticketId,
-      status: statusMap[result.status],
-      message: result.message,
-    });
+    const comment = `${statusEmoji[result.status]} **${result.status.toUpperCase()}** — ${result.message}`;
+    await this.postIssueComment(agentId, issueId, result.status, comment);
 
-    // Also update the ticket status in Paperclip if completed
+    // Also update the issue status in Paperclip if completed or blocked
     if (result.status === "completed") {
-      await this.updateTicketStatus(ticketId, "done");
+      await this.updateIssueStatus(issueId, "done");
     } else if (result.status === "needs-human") {
-      await this.updateTicketStatus(ticketId, "blocked");
+      await this.updateIssueStatus(issueId, "blocked");
     }
   }
 
@@ -100,30 +102,33 @@ export class PaperclipReporter {
    * Report the result of a direct agent dispatch.
    *
    * @param agentId - The BMAD agent that handled the dispatch
-   * @param ticketId - The Paperclip ticket ID
+   * @param issueId - The Paperclip issue ID
    * @param result - DispatchResult from AgentDispatcher.dispatch()
    * @param artifacts - Optional list of artifact paths produced
    */
   async reportDispatchResult(
     agentId: string,
-    ticketId: string,
+    issueId: string,
     result: DispatchResult,
     artifacts?: string[],
   ): Promise<void> {
-    await this.sendReport({
-      agentId,
-      ticketId,
-      status: result.success ? "completed" : "failed",
-      message: result.success
-        ? `${result.agentName} completed successfully.`
-        : `${result.agentName} failed: ${result.error ?? "unknown error"}`,
-      artifacts,
-    });
+    const status = result.success ? "completed" : "failed";
+    const emoji = result.success ? "✅" : "❌";
+    let comment = `${emoji} **${status.toUpperCase()}** — ${result.success
+      ? `${result.agentName} completed successfully.`
+      : `${result.agentName} failed: ${result.error ?? "unknown error"}`
+    }`;
+
+    if (artifacts?.length) {
+      comment += `\n\n**Artifacts:**\n${artifacts.map((a) => `- \`${a}\``).join("\n")}`;
+    }
+
+    await this.postIssueComment(agentId, issueId, status, comment);
   }
 
   /**
    * Report a sprint lifecycle event to Paperclip.
-   * Selectively reports significant events (start, complete, escalation).
+   * Selectively reports significant events (complete, escalation, failure).
    *
    * @param event - SprintEvent from SprintRunner
    * @param agentId - The BMAD agent context (for agent-scoped events)
@@ -132,38 +137,38 @@ export class PaperclipReporter {
     switch (event.type) {
       case "story-complete":
         if (agentId && event.result.success) {
-          await this.sendReport({
+          await this.postIssueComment(
             agentId,
-            ticketId: event.storyId,
-            status: "completed",
-            message: `Phase ${event.phase} completed by ${event.result.agentName}.`,
-          });
+            event.storyId,
+            "completed",
+            `✅ Phase ${event.phase} completed by ${event.result.agentName}.`,
+          );
         }
         break;
 
       case "story-escalated":
         if (agentId) {
-          await this.sendReport({
+          await this.postIssueComment(
             agentId,
-            ticketId: event.storyId,
-            status: "needs-human",
-            message: `Escalated: ${event.reason}`,
-          });
+            event.storyId,
+            "needs-human",
+            `⚠️ **ESCALATED** — ${event.reason}`,
+          );
         }
         break;
 
       case "story-failed":
         if (agentId) {
-          await this.sendReport({
+          await this.postIssueComment(
             agentId,
-            ticketId: event.storyId,
-            status: "failed",
-            message: `Failed: ${event.error}`,
-          });
+            event.storyId,
+            "failed",
+            `❌ **FAILED** — ${event.error}`,
+          );
         }
         break;
 
-      // Sprint-level events are logged but not reported per-ticket
+      // Sprint-level events are logged but not reported per-issue
       case "sprint-start":
       case "sprint-complete":
       case "sprint-idle":
@@ -178,32 +183,40 @@ export class PaperclipReporter {
   // ── Low-Level Reporting ───────────────────────────────────────────────
 
   /**
-   * Send a status report to Paperclip and record it in the history log.
+   * Post a comment to a Paperclip issue and record it in the history log.
+   *
+   * This is the primary reporting mechanism — replaces the old
+   * `reportStatus()` which called a non-existent `/api/v1/reports` endpoint.
    */
-  private async sendReport(report: PaperclipStatusReport): Promise<void> {
+  private async postIssueComment(
+    agentId: string,
+    issueId: string,
+    status: string,
+    comment: string,
+  ): Promise<void> {
     const entry: ReportLogEntry = {
       timestamp: new Date().toISOString(),
-      agentId: report.agentId,
-      ticketId: report.ticketId,
-      status: report.status,
-      message: report.message,
+      agentId,
+      issueId,
+      status,
+      message: comment,
       success: false,
     };
 
     try {
-      await this.client.reportStatus(report);
+      await this.client.addIssueComment(issueId, comment);
       entry.success = true;
-      log.info("Reported status", {
-        agentId: report.agentId,
-        ticketId: report.ticketId,
-        status: report.status,
+      log.info("Posted issue comment", {
+        agentId,
+        issueId,
+        status,
       });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       entry.error = errorMsg;
-      log.error("Failed to report status", {
-        agentId: report.agentId,
-        ticketId: report.ticketId,
+      log.error("Failed to post issue comment", {
+        agentId,
+        issueId,
       }, err instanceof Error ? err : undefined);
     }
 
@@ -211,18 +224,20 @@ export class PaperclipReporter {
   }
 
   /**
-   * Update a ticket's status in Paperclip. Silently logs failures.
+   * Update an issue's status in Paperclip. Silently logs failures.
+   *
+   * Uses PATCH /api/issues/:id (real endpoint).
    */
-  private async updateTicketStatus(
-    ticketId: string,
-    status: PaperclipTicket["status"],
+  private async updateIssueStatus(
+    issueId: string,
+    status: string,
   ): Promise<void> {
     try {
-      await this.client.updateTicket(ticketId, { status });
-      log.info("Ticket status updated", { ticketId, status });
+      await this.client.updateIssue(issueId, { status });
+      log.info("Issue status updated", { issueId, status });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      log.error("Failed to update ticket", { ticketId, status, error: errorMsg });
+      log.error("Failed to update issue", { issueId, status, error: errorMsg });
     }
   }
 

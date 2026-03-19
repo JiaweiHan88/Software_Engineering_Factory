@@ -1,21 +1,29 @@
 /**
- * Paperclip Loop — Heartbeat-Driven Integration Loop
+ * Paperclip Loop — Issue-Driven Integration Engine
  *
- * The main Paperclip ↔ BMAD integration engine. Polls Paperclip for
- * heartbeats, dispatches work to BMAD agents, and reports results back.
+ * The main Paperclip ↔ BMAD integration engine. Aligned with the real
+ * Paperclip API (push model, not poll model).
  *
- * This is the Paperclip-mode alternative to the standalone SprintRunner.
- * Instead of reading sprint-status.yaml directly, it takes work assignments
- * from Paperclip's org chart scheduler.
+ * Two integration modes:
+ *
+ * 1. **Inbox-polling bridge** (development/default):
+ *    Periodically checks GET /api/agents/me/inbox-lite for assigned issues,
+ *    then dispatches them to BMAD agents. This is a BMAD-side convenience,
+ *    not a real Paperclip API contract.
+ *
+ * 2. **Webhook server** (production):
+ *    Exposes an HTTP endpoint that Paperclip calls on heartbeat invoke.
+ *    The BMAD factory processes the work and responds.
+ *    (Webhook server implementation is planned for Phase 2.)
  *
  * Lifecycle:
- * 1. Register all BMAD agents with Paperclip
- * 2. Enter poll loop:
- *    a. Poll Paperclip for heartbeats (assigned work)
- *    b. For each heartbeat, dispatch to the appropriate BMAD agent
- *    c. Report results back to Paperclip
- *    d. Sleep for the suggested interval
- * 3. On shutdown, deregister agents and clean up sessions
+ * 1. Create BMAD agents in Paperclip (POST /api/companies/:companyId/agents)
+ * 2. Enter inbox check loop:
+ *    a. Check inbox for assigned issues
+ *    b. For each issue, dispatch to the appropriate BMAD agent
+ *    c. Report results back via issue comments
+ *    d. Sleep for the configured interval
+ * 3. On shutdown, pause agents and clean up sessions
  *
  * @module adapter/paperclip-loop
  */
@@ -24,9 +32,9 @@ import type { BmadConfig } from "../config/config.js";
 import type { AgentDispatcher } from "./agent-dispatcher.js";
 import type { SessionManager } from "./session-manager.js";
 import { PaperclipClient } from "./paperclip-client.js";
-import type { PaperclipHeartbeat } from "./paperclip-client.js";
+import type { PaperclipIssue } from "./paperclip-client.js";
 import { PaperclipReporter } from "./reporter.js";
-import { handlePaperclipHeartbeat } from "./heartbeat-handler.js";
+import { handlePaperclipIssue } from "./heartbeat-handler.js";
 import type { HeartbeatResult } from "./heartbeat-handler.js";
 import { Logger } from "../observability/logger.js";
 
@@ -39,13 +47,13 @@ import { allAgents } from "../agents/registry.js";
 
 /** Paperclip loop lifecycle events. */
 export type PaperclipLoopEvent =
-  | { type: "loop-start"; agentCount: number }
-  | { type: "poll"; heartbeatCount: number }
-  | { type: "heartbeat-processed"; agentId: string; ticketId?: string; result: HeartbeatResult }
-  | { type: "heartbeat-error"; agentId: string; error: string }
-  | { type: "poll-error"; error: string }
+  | { type: "loop-start"; agentCount: number; mode: "inbox-polling" | "webhook" }
+  | { type: "inbox-check"; issueCount: number }
+  | { type: "issue-processed"; agentId: string; issueId: string; result: HeartbeatResult }
+  | { type: "issue-error"; agentId: string; issueId: string; error: string }
+  | { type: "inbox-error"; error: string }
   | { type: "loop-stop"; reason: string }
-  | { type: "agents-registered"; count: number };
+  | { type: "agents-created"; count: number };
 
 export type PaperclipLoopEventHandler = (event: PaperclipLoopEvent) => void;
 
@@ -59,12 +67,12 @@ export interface PaperclipLoopOptions {
   onEvent?: PaperclipLoopEventHandler;
   /** Streaming callback for agent output */
   onDelta?: (delta: string) => void;
-  /** Override poll interval (defaults to config.paperclip.pollIntervalMs) */
-  pollIntervalMs?: number;
-  /** Maximum number of poll cycles before stopping (undefined = infinite) */
+  /** Override inbox check interval (defaults to config.paperclip.inboxCheckIntervalMs) */
+  inboxCheckIntervalMs?: number;
+  /** Maximum number of check cycles before stopping (undefined = infinite) */
   maxCycles?: number;
-  /** Whether to register agents on startup (default: true) */
-  registerAgents?: boolean;
+  /** Whether to create agents on startup (default: true) */
+  createAgents?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,7 +80,11 @@ export interface PaperclipLoopOptions {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * PaperclipLoop drives the BMAD factory via Paperclip's heartbeat mechanism.
+ * PaperclipLoop drives the BMAD factory via Paperclip's issue assignment.
+ *
+ * In inbox-polling mode (default/dev), periodically checks the agent inbox
+ * for assigned issues. In webhook mode (production), receives heartbeat
+ * callbacks from Paperclip.
  *
  * Usage:
  * ```ts
@@ -104,8 +116,8 @@ export class PaperclipLoop {
 
     this.client = new PaperclipClient({
       baseUrl: config.paperclip.url,
-      apiKey: config.paperclip.apiKey,
-      orgId: config.paperclip.orgId,
+      agentApiKey: config.paperclip.agentApiKey,
+      companyId: config.paperclip.companyId,
       timeoutMs: config.paperclip.timeoutMs,
     });
 
@@ -121,9 +133,9 @@ export class PaperclipLoop {
   async start(opts: PaperclipLoopOptions = {}): Promise<void> {
     const {
       onEvent,
-      pollIntervalMs = this.config.paperclip.pollIntervalMs,
+      inboxCheckIntervalMs = this.config.paperclip.inboxCheckIntervalMs,
       maxCycles,
-      registerAgents = true,
+      createAgents = true,
     } = opts;
 
     if (this.running) {
@@ -133,9 +145,11 @@ export class PaperclipLoop {
     this.running = true;
     this.abortController = new AbortController();
 
-    // 1. Register BMAD agents with Paperclip
-    if (registerAgents) {
-      await this.registerAllAgents(onEvent);
+    const mode = this.config.paperclip.mode;
+
+    // 1. Create BMAD agents in Paperclip
+    if (createAgents) {
+      await this.createAllAgents(onEvent);
     }
 
     // 2. Start the Copilot SDK
@@ -145,13 +159,18 @@ export class PaperclipLoop {
       log.info("SDK ready");
     }
 
-    // Get agent IDs for polling
-    const agentIds = allAgents.map((a) => a.name);
+    onEvent?.({ type: "loop-start", agentCount: allAgents.length, mode });
+    log.info("Starting integration loop", { mode, inboxCheckIntervalMs, agents: allAgents.length });
 
-    onEvent?.({ type: "loop-start", agentCount: agentIds.length });
-    log.info("Starting heartbeat loop", { pollIntervalMs, agents: agentIds });
+    if (mode === "webhook") {
+      // Webhook mode — placeholder for Phase 2
+      log.info("Webhook mode: waiting for heartbeat callbacks on port " + this.config.paperclip.webhookPort);
+      // TODO: Start HTTP server to receive heartbeat callbacks
+      // For now, fall through to inbox-polling as fallback
+      log.warn("Webhook server not yet implemented, falling back to inbox-polling");
+    }
 
-    // 3. Poll loop
+    // 3. Inbox-polling loop
     let cycle = 0;
     while (this.running) {
       // Check max cycles
@@ -161,26 +180,25 @@ export class PaperclipLoop {
       }
 
       try {
-        // Poll Paperclip for heartbeats
-        const pollResult = await this.client.pollHeartbeats(agentIds);
+        // Check inbox for assigned issues
+        const issues = await this.client.getAgentInbox();
 
-        onEvent?.({ type: "poll", heartbeatCount: pollResult.heartbeats.length });
+        onEvent?.({ type: "inbox-check", issueCount: issues.length });
 
-        // Process each heartbeat
-        for (const heartbeat of pollResult.heartbeats) {
-          await this.processHeartbeat(heartbeat, onEvent);
+        // Process each assigned issue
+        for (const issue of issues) {
+          await this.processIssue(issue, onEvent);
         }
 
-        // Respect the server's suggested poll delay
-        const delay = pollResult.nextPollAfterMs || pollIntervalMs;
-        await this.sleep(delay);
+        // Sleep before next check
+        await this.sleep(inboxCheckIntervalMs);
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
-        onEvent?.({ type: "poll-error", error: errorMsg });
-        log.error("Poll error", {}, err instanceof Error ? err : undefined);
+        onEvent?.({ type: "inbox-error", error: errorMsg });
+        log.error("Inbox check error", {}, err instanceof Error ? err : undefined);
 
         // Back off on errors
-        await this.sleep(pollIntervalMs * 2);
+        await this.sleep(inboxCheckIntervalMs * 2);
       }
 
       cycle++;
@@ -198,12 +216,12 @@ export class PaperclipLoop {
     this.running = false;
     this.abortController?.abort();
 
-    // Deregister agents (mark offline)
+    // Pause agents (real Paperclip status model)
     for (const agent of allAgents) {
       try {
-        await this.client.updateAgentStatus(agent.name, "offline");
+        await this.client.pauseAgent(agent.name);
       } catch {
-        // Best-effort
+        // Best-effort — agent may not exist in Paperclip yet
       }
     }
 
@@ -236,80 +254,101 @@ export class PaperclipLoop {
   // ── Internal Helpers ──────────────────────────────────────────────────
 
   /**
-   * Register all BMAD agents with Paperclip.
+   * Create all BMAD agents in Paperclip.
+   *
+   * Uses POST /api/companies/:companyId/agents (real endpoint).
+   * Replaces the old registerAgent() which called PUT /api/v1/agents/:id.
    */
-  private async registerAllAgents(
+  private async createAllAgents(
     onEvent?: PaperclipLoopEventHandler,
   ): Promise<void> {
-    let registered = 0;
+    let created = 0;
     for (const agent of allAgents) {
       try {
-        await this.client.registerAgent({
-          id: agent.name,
+        await this.client.createAgent({
           name: agent.displayName,
-          role: agent.name,
-          status: "idle",
+          title: agent.name,
+          companyId: this.config.paperclip.companyId,
+          status: "active",
+          heartbeatEnabled: true,
           metadata: {
             description: agent.description,
             bmadMethodology: "v6",
+            bmadRole: agent.name,
           },
         });
-        registered++;
-        log.info("Registered agent", { agent: agent.displayName });
+        created++;
+        log.info("Created agent", { agent: agent.displayName });
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
-        log.error("Failed to register agent", { agent: agent.displayName, error: errorMsg });
+        // 409 Conflict = agent already exists, which is fine
+        if (errorMsg.includes("409") || errorMsg.includes("already exists")) {
+          log.debug("Agent already exists", { agent: agent.displayName });
+          created++;
+        } else {
+          log.error("Failed to create agent", { agent: agent.displayName, error: errorMsg });
+        }
       }
     }
 
-    onEvent?.({ type: "agents-registered", count: registered });
+    onEvent?.({ type: "agents-created", count: created });
   }
 
   /**
-   * Process a single heartbeat: acknowledge, dispatch, report.
+   * Process a single issue from the inbox: dispatch to BMAD agent, report result.
    */
-  private async processHeartbeat(
-    heartbeat: PaperclipHeartbeat,
+  private async processIssue(
+    issue: PaperclipIssue,
     onEvent?: PaperclipLoopEventHandler,
   ): Promise<void> {
-    const ticketId = heartbeat.ticket?.id;
+    // Determine which BMAD agent should handle this issue
+    const bmadRole = this.inferAgentRole(issue);
+    const agentId = bmadRole; // Use the BMAD role name as agent identifier
 
     try {
-      // Acknowledge the heartbeat
-      if (ticketId) {
-        await this.client.acknowledgeHeartbeat(heartbeat.agentId, ticketId);
-      }
-
-      // Mark agent as working
-      await this.client.updateAgentStatus(heartbeat.agentId, "working");
-
       // Process via the heartbeat handler
-      const result = await handlePaperclipHeartbeat(
-        heartbeat,
+      const result = await handlePaperclipIssue(
+        issue,
+        agentId,
+        bmadRole,
         this.dispatcher,
         this.reporter,
       );
 
       onEvent?.({
-        type: "heartbeat-processed",
-        agentId: heartbeat.agentId,
-        ticketId,
+        type: "issue-processed",
+        agentId,
+        issueId: issue.id,
         result,
       });
-
-      // Mark agent as idle when done
-      await this.client.updateAgentStatus(heartbeat.agentId, "idle");
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      onEvent?.({ type: "heartbeat-error", agentId: heartbeat.agentId, error: errorMsg });
-      log.error("Heartbeat processing error", { agentId: heartbeat.agentId }, err instanceof Error ? err : undefined);
+      onEvent?.({ type: "issue-error", agentId, issueId: issue.id, error: errorMsg });
+      log.error("Issue processing error", { agentId, issueId: issue.id }, err instanceof Error ? err : undefined);
+    }
+  }
 
-      // Mark agent as stalled
-      try {
-        await this.client.updateAgentStatus(heartbeat.agentId, "stalled");
-      } catch {
-        // Best-effort
-      }
+  /**
+   * Infer which BMAD agent should handle an issue based on its metadata.
+   */
+  private inferAgentRole(issue: PaperclipIssue): string {
+    // Check metadata for explicit BMAD role
+    if (issue.metadata?.bmadRole) {
+      return issue.metadata.bmadRole as string;
+    }
+
+    // Check phase to determine role
+    switch (issue.phase) {
+      case "create-story":
+        return "bmad-pm";
+      case "dev-story":
+        return "bmad-dev";
+      case "code-review":
+        return "bmad-qa";
+      case "sprint-planning":
+        return "bmad-sm";
+      default:
+        return "bmad-dev"; // Default to developer
     }
   }
 

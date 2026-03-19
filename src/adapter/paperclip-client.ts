@@ -1,89 +1,99 @@
 /**
  * Paperclip API Client — HTTP interface to Paperclip orchestrator.
  *
- * Provides typed access to Paperclip's REST API for:
- * - Agent registration and heartbeat polling
- * - Ticket/task assignment and status updates
- * - Organization and role management
- * - Sprint and goal tracking
+ * Aligned with the **real Paperclip API** (paperclipai/paperclip).
  *
- * All methods throw `PaperclipApiError` on non-2xx responses.
+ * Key differences from previous (speculative) implementation:
+ * - API prefix: `/api` (no version prefix)
+ * - Company-scoped data model (not "org")
+ * - Issues, not tickets
+ * - Push model: Paperclip invokes heartbeats on agents (no polling endpoint)
+ * - Agent status: active | paused | terminated (not idle/working/stalled/offline)
+ * - Auth: Bearer agent API key (no X-Paperclip-Org header)
+ * - Results flow back via issue comments (no /reports endpoint)
  *
  * @module adapter/paperclip-client
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Paperclip Data Models
+// Paperclip Data Models (aligned with real API)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Paperclip agent registration record. */
+/** Paperclip agent record — matches real `/api/agents/:id` shape. */
 export interface PaperclipAgent {
   id: string;
   name: string;
-  role: string;
-  status: "idle" | "working" | "stalled" | "offline";
-  lastHeartbeat?: string;
-  assignedTicket?: string;
+  title: string;
+  companyId: string;
+  status: "active" | "paused" | "terminated";
+  reportsTo?: string;
+  adapterType?: string;
+  heartbeatEnabled: boolean;
+  heartbeatCronSchedule?: string;
+  monthlyBudget?: number;
   metadata?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
-/** Paperclip ticket/task record. */
-export interface PaperclipTicket {
+/** Paperclip issue record — matches real `/api/issues/:id` shape. */
+export interface PaperclipIssue {
   id: string;
   title: string;
   description: string;
-  status: "open" | "assigned" | "in-progress" | "review" | "done" | "blocked";
-  assignedAgent?: string;
-  priority: number;
-  labels: string[];
+  status: string;
+  assigneeId?: string;
+  projectId?: string;
+  goalId?: string;
+  parentIssueId?: string;
+  companyId?: string;
+  labels?: string[];
+  /** BMAD-specific: story ID mapped from issue metadata */
   storyId?: string;
+  /** BMAD-specific: workflow phase */
   phase?: string;
-  createdAt: string;
-  updatedAt: string;
+  createdAt?: string;
+  updatedAt?: string;
   metadata?: Record<string, unknown>;
 }
 
-/** Paperclip heartbeat payload — sent periodically to each agent. */
-export interface PaperclipHeartbeat {
-  agentId: string;
-  agentRole: string;
-  ticket?: PaperclipTicket;
-  timestamp: string;
-  instructions?: string;
-  metadata?: Record<string, unknown>;
+/** A comment on a Paperclip issue. */
+export interface PaperclipIssueComment {
+  id?: string;
+  issueId: string;
+  body: string;
+  authorId?: string;
+  createdAt?: string;
 }
 
-/** A batch of heartbeats returned by the poll endpoint. */
-export interface HeartbeatPollResponse {
-  heartbeats: PaperclipHeartbeat[];
-  nextPollAfterMs: number;
-}
-
-/** Status report payload to send back to Paperclip. */
-export interface PaperclipStatusReport {
-  agentId: string;
-  ticketId: string;
-  status: "working" | "completed" | "failed" | "needs-human";
-  message: string;
-  artifacts?: string[];
-  metadata?: Record<string, unknown>;
-}
-
-/** Paperclip organization summary. */
-export interface PaperclipOrg {
+/** Heartbeat run record — represents a completed/running heartbeat invocation. */
+export interface HeartbeatRun {
   id: string;
-  name: string;
-  agentCount: number;
-  activeTickets: number;
-  goals: PaperclipGoal[];
+  agentId: string;
+  companyId: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  startedAt: string;
+  completedAt?: string;
+  transcript?: string;
+  metadata?: Record<string, unknown>;
 }
 
-/** Paperclip goal/objective. */
+/** Org chart tree node — matches real `/api/companies/:companyId/org` shape. */
+export interface OrgNode {
+  agent: PaperclipAgent;
+  children: OrgNode[];
+}
+
+/** Paperclip goal — matches real `/api/companies/:companyId/goals` shape. */
 export interface PaperclipGoal {
   id: string;
   title: string;
-  status: "active" | "completed" | "paused";
-  progress: number;
+  description?: string;
+  status: string;
+  companyId: string;
+  createdAt?: string;
+  updatedAt?: string;
+  metadata?: Record<string, unknown>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -113,10 +123,10 @@ export class PaperclipApiError extends Error {
 export interface PaperclipClientOptions {
   /** Base URL of the Paperclip server (e.g., "http://localhost:3100") */
   baseUrl: string;
-  /** API key for authentication (optional — not needed in local_trusted mode) */
-  apiKey?: string;
-  /** Organization ID to scope requests */
-  orgId?: string;
+  /** Agent API key for Bearer auth (optional — not needed in local_trusted mode) */
+  agentApiKey?: string;
+  /** Company ID to scope company-level requests */
+  companyId?: string;
   /** Request timeout in milliseconds (default 10_000) */
   timeoutMs?: number;
 }
@@ -126,36 +136,39 @@ export interface PaperclipClientOptions {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * HTTP client for the Paperclip orchestration platform.
+ * HTTP client for the real Paperclip orchestration platform.
+ *
+ * API reference: `paperclipai/paperclip` → `packages/shared/src/api.ts`
  *
  * Usage:
  * ```ts
  * const client = new PaperclipClient({
  *   baseUrl: "http://localhost:3100",
- *   orgId: "bmad-factory",
+ *   companyId: "bmad-factory",
+ *   agentApiKey: "my-agent-key",
  * });
  *
- * // Register a BMAD agent
- * await client.registerAgent({ id: "bmad-dev", name: "BMAD Developer", role: "developer" });
+ * // Create a BMAD agent
+ * await client.createAgent({ name: "BMAD Developer", title: "Developer", ... });
  *
- * // Poll for heartbeats
- * const { heartbeats } = await client.pollHeartbeats(["bmad-dev", "bmad-pm"]);
+ * // Get assigned work (inbox-polling bridge)
+ * const inbox = await client.getAgentInbox();
  *
- * // Report status back
- * await client.reportStatus({ agentId: "bmad-dev", ticketId: "T-1", status: "completed", message: "Done" });
+ * // Post status update via issue comment
+ * await client.addIssueComment(issueId, "✅ Story implemented successfully.");
  * ```
  */
 export class PaperclipClient {
   private baseUrl: string;
-  private apiKey?: string;
-  private orgId: string;
+  private agentApiKey?: string;
+  private companyId: string;
   private timeoutMs: number;
 
   constructor(opts: PaperclipClientOptions) {
     // Strip trailing slash
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
-    this.apiKey = opts.apiKey;
-    this.orgId = opts.orgId ?? "default";
+    this.agentApiKey = opts.agentApiKey;
+    this.companyId = opts.companyId ?? "default";
     this.timeoutMs = opts.timeoutMs ?? 10_000;
   }
 
@@ -163,17 +176,17 @@ export class PaperclipClient {
 
   /**
    * Build standard headers for Paperclip API requests.
+   *
+   * Real Paperclip uses Bearer token auth (agent API keys).
+   * No custom headers like X-Paperclip-Org — company scoping is in the URL path.
    */
   private headers(): Record<string, string> {
     const h: Record<string, string> = {
       "Content-Type": "application/json",
       Accept: "application/json",
     };
-    if (this.apiKey) {
-      h["Authorization"] = `Bearer ${this.apiKey}`;
-    }
-    if (this.orgId) {
-      h["X-Paperclip-Org"] = this.orgId;
+    if (this.agentApiKey) {
+      h["Authorization"] = `Bearer ${this.agentApiKey}`;
     }
     return h;
   }
@@ -221,145 +234,262 @@ export class PaperclipClient {
   // ── Agent Management ──────────────────────────────────────────────────
 
   /**
-   * Register or update a BMAD agent in Paperclip.
+   * Create (hire) a new agent in the company.
+   * Real endpoint: POST /api/companies/:companyId/agents
    */
-  async registerAgent(agent: Omit<PaperclipAgent, "lastHeartbeat">): Promise<PaperclipAgent> {
-    return this.request<PaperclipAgent>("PUT", `/api/v1/agents/${agent.id}`, agent);
-  }
-
-  /**
-   * List all registered agents.
-   */
-  async listAgents(): Promise<PaperclipAgent[]> {
-    return this.request<PaperclipAgent[]>("GET", "/api/v1/agents");
-  }
-
-  /**
-   * Get a single agent by ID.
-   */
-  async getAgent(agentId: string): Promise<PaperclipAgent> {
-    return this.request<PaperclipAgent>("GET", `/api/v1/agents/${agentId}`);
-  }
-
-  /**
-   * Update an agent's status (e.g., working → idle).
-   */
-  async updateAgentStatus(
-    agentId: string,
-    status: PaperclipAgent["status"],
-    metadata?: Record<string, unknown>,
-  ): Promise<void> {
-    await this.request<void>("PATCH", `/api/v1/agents/${agentId}/status`, {
-      status,
-      metadata,
-    });
-  }
-
-  // ── Heartbeat Polling ─────────────────────────────────────────────────
-
-  /**
-   * Poll Paperclip for pending heartbeats for the given agent IDs.
-   *
-   * This is the core integration point — the BMAD factory calls this on an
-   * interval to discover work assigned by Paperclip's org chart scheduler.
-   *
-   * @param agentIds - Agent IDs to poll for (e.g., ["bmad-dev", "bmad-pm"])
-   * @returns Heartbeats with assigned tickets and suggested poll delay
-   */
-  async pollHeartbeats(agentIds: string[]): Promise<HeartbeatPollResponse> {
-    return this.request<HeartbeatPollResponse>(
+  async createAgent(agent: Omit<PaperclipAgent, "id" | "createdAt" | "updatedAt">): Promise<PaperclipAgent> {
+    return this.request<PaperclipAgent>(
       "POST",
-      "/api/v1/heartbeats/poll",
-      { agentIds },
+      `/api/companies/${this.companyId}/agents`,
+      agent,
     );
   }
 
   /**
-   * Acknowledge a heartbeat — tells Paperclip the agent received the work.
+   * List all agents in the company.
+   * Real endpoint: GET /api/companies/:companyId/agents
    */
-  async acknowledgeHeartbeat(agentId: string, ticketId: string): Promise<void> {
-    await this.request<void>("POST", `/api/v1/heartbeats/${agentId}/ack`, {
-      ticketId,
-    });
+  async listAgents(): Promise<PaperclipAgent[]> {
+    return this.request<PaperclipAgent[]>(
+      "GET",
+      `/api/companies/${this.companyId}/agents`,
+    );
   }
 
-  // ── Ticket Management ─────────────────────────────────────────────────
+  /**
+   * Get a single agent by ID.
+   * Real endpoint: GET /api/agents/:id
+   */
+  async getAgent(agentId: string): Promise<PaperclipAgent> {
+    return this.request<PaperclipAgent>("GET", `/api/agents/${agentId}`);
+  }
 
   /**
-   * List tickets, optionally filtered by status or assignment.
+   * Get the current agent (self) via agent-key auth.
+   * Real endpoint: GET /api/agents/me
    */
-  async listTickets(filters?: {
-    status?: PaperclipTicket["status"];
-    assignedAgent?: string;
-    label?: string;
-  }): Promise<PaperclipTicket[]> {
+  async getAgentSelf(): Promise<PaperclipAgent> {
+    return this.request<PaperclipAgent>("GET", "/api/agents/me");
+  }
+
+  /**
+   * Update agent metadata.
+   * Real endpoint: PATCH /api/agents/:id
+   */
+  async updateAgent(
+    agentId: string,
+    updates: Partial<Pick<PaperclipAgent, "name" | "title" | "reportsTo" | "heartbeatEnabled" | "heartbeatCronSchedule" | "monthlyBudget" | "metadata">>,
+  ): Promise<PaperclipAgent> {
+    return this.request<PaperclipAgent>(
+      "PATCH",
+      `/api/agents/${agentId}`,
+      updates,
+    );
+  }
+
+  /**
+   * Pause an agent.
+   * Real endpoint: POST /api/agents/:id/pause
+   */
+  async pauseAgent(agentId: string): Promise<void> {
+    await this.request<void>("POST", `/api/agents/${agentId}/pause`);
+  }
+
+  /**
+   * Resume a paused agent.
+   * Real endpoint: POST /api/agents/:id/resume
+   */
+  async resumeAgent(agentId: string): Promise<void> {
+    await this.request<void>("POST", `/api/agents/${agentId}/resume`);
+  }
+
+  /**
+   * Terminate an agent permanently.
+   * Real endpoint: POST /api/agents/:id/terminate
+   */
+  async terminateAgent(agentId: string): Promise<void> {
+    await this.request<void>("POST", `/api/agents/${agentId}/terminate`);
+  }
+
+  // ── Heartbeat / Wakeup ────────────────────────────────────────────────
+
+  /**
+   * Invoke a heartbeat run on an agent (server-initiated push).
+   * Real endpoint: POST /api/agents/:id/heartbeat/invoke
+   *
+   * NOTE: In the real Paperclip model, the *server* calls this endpoint
+   * to push work to agents. The BMAD factory doesn't poll for heartbeats.
+   */
+  async invokeHeartbeat(agentId: string): Promise<HeartbeatRun> {
+    return this.request<HeartbeatRun>(
+      "POST",
+      `/api/agents/${agentId}/heartbeat/invoke`,
+    );
+  }
+
+  /**
+   * Wake an agent for event-driven work.
+   * Real endpoint: POST /api/agents/:id/wakeup
+   */
+  async wakeAgent(agentId: string): Promise<void> {
+    await this.request<void>("POST", `/api/agents/${agentId}/wakeup`);
+  }
+
+  /**
+   * Get the agent's assigned work inbox (dev convenience / bridge mode).
+   * Real endpoint: GET /api/agents/me/inbox-lite
+   */
+  async getAgentInbox(): Promise<PaperclipIssue[]> {
+    return this.request<PaperclipIssue[]>("GET", "/api/agents/me/inbox-lite");
+  }
+
+  // ── Heartbeat Runs ────────────────────────────────────────────────────
+
+  /**
+   * List heartbeat runs for the company.
+   * Real endpoint: GET /api/companies/:companyId/heartbeat-runs
+   */
+  async listHeartbeatRuns(): Promise<HeartbeatRun[]> {
+    return this.request<HeartbeatRun[]>(
+      "GET",
+      `/api/companies/${this.companyId}/heartbeat-runs`,
+    );
+  }
+
+  /**
+   * Get a specific heartbeat run.
+   * Real endpoint: GET /api/heartbeat-runs/:runId
+   */
+  async getHeartbeatRun(runId: string): Promise<HeartbeatRun> {
+    return this.request<HeartbeatRun>("GET", `/api/heartbeat-runs/${runId}`);
+  }
+
+  /**
+   * Cancel a running heartbeat.
+   * Real endpoint: POST /api/heartbeat-runs/:runId/cancel
+   */
+  async cancelHeartbeatRun(runId: string): Promise<void> {
+    await this.request<void>("POST", `/api/heartbeat-runs/${runId}/cancel`);
+  }
+
+  /**
+   * Get currently running heartbeats (live runs).
+   * Real endpoint: GET /api/companies/:companyId/live-runs
+   */
+  async getLiveRuns(): Promise<HeartbeatRun[]> {
+    return this.request<HeartbeatRun[]>(
+      "GET",
+      `/api/companies/${this.companyId}/live-runs`,
+    );
+  }
+
+  // ── Issue Management ──────────────────────────────────────────────────
+
+  /**
+   * List issues for the company.
+   * Real endpoint: GET /api/companies/:companyId/issues
+   */
+  async listIssues(filters?: {
+    status?: string;
+    assigneeId?: string;
+    projectId?: string;
+    goalId?: string;
+  }): Promise<PaperclipIssue[]> {
     const params = new URLSearchParams();
     if (filters?.status) params.set("status", filters.status);
-    if (filters?.assignedAgent) params.set("assigned_agent", filters.assignedAgent);
-    if (filters?.label) params.set("label", filters.label);
+    if (filters?.assigneeId) params.set("assignee_id", filters.assigneeId);
+    if (filters?.projectId) params.set("project_id", filters.projectId);
+    if (filters?.goalId) params.set("goal_id", filters.goalId);
     const qs = params.toString();
-    return this.request<PaperclipTicket[]>("GET", `/api/v1/tickets${qs ? `?${qs}` : ""}`);
+    return this.request<PaperclipIssue[]>(
+      "GET",
+      `/api/companies/${this.companyId}/issues${qs ? `?${qs}` : ""}`,
+    );
   }
 
   /**
-   * Get a single ticket by ID.
+   * Get a single issue by ID.
+   * Real endpoint: GET /api/issues/:id
    */
-  async getTicket(ticketId: string): Promise<PaperclipTicket> {
-    return this.request<PaperclipTicket>("GET", `/api/v1/tickets/${ticketId}`);
+  async getIssue(issueId: string): Promise<PaperclipIssue> {
+    return this.request<PaperclipIssue>("GET", `/api/issues/${issueId}`);
   }
 
   /**
-   * Create a new ticket in Paperclip.
+   * Create a new issue in the company.
+   * Real endpoint: POST /api/companies/:companyId/issues
    */
-  async createTicket(ticket: Omit<PaperclipTicket, "id" | "createdAt" | "updatedAt">): Promise<PaperclipTicket> {
-    return this.request<PaperclipTicket>("POST", "/api/v1/tickets", ticket);
+  async createIssue(issue: Omit<PaperclipIssue, "id" | "createdAt" | "updatedAt">): Promise<PaperclipIssue> {
+    return this.request<PaperclipIssue>(
+      "POST",
+      `/api/companies/${this.companyId}/issues`,
+      issue,
+    );
   }
 
   /**
-   * Update a ticket's status and/or metadata.
+   * Update an existing issue.
+   * Real endpoint: PATCH /api/issues/:id
    */
-  async updateTicket(
-    ticketId: string,
-    updates: Partial<Pick<PaperclipTicket, "status" | "assignedAgent" | "labels" | "metadata">>,
-  ): Promise<PaperclipTicket> {
-    return this.request<PaperclipTicket>("PATCH", `/api/v1/tickets/${ticketId}`, updates);
+  async updateIssue(
+    issueId: string,
+    updates: Partial<Pick<PaperclipIssue, "title" | "description" | "status" | "assigneeId" | "labels" | "metadata">>,
+  ): Promise<PaperclipIssue> {
+    return this.request<PaperclipIssue>(
+      "PATCH",
+      `/api/issues/${issueId}`,
+      updates,
+    );
   }
 
-  // ── Status Reporting ──────────────────────────────────────────────────
-
   /**
-   * Report the outcome of processing a heartbeat/ticket back to Paperclip.
+   * Add a comment to an issue (primary mechanism for reporting results).
+   * Real endpoint: POST /api/issues/:id/comments
    *
-   * This closes the loop: Paperclip assigns work → BMAD processes → report result.
+   * This replaces the old reportStatus() — in real Paperclip, results flow
+   * back through issue comments and heartbeat run transcripts.
    */
-  async reportStatus(report: PaperclipStatusReport): Promise<void> {
-    await this.request<void>("POST", "/api/v1/reports", report);
+  async addIssueComment(issueId: string, body: string): Promise<PaperclipIssueComment> {
+    return this.request<PaperclipIssueComment>(
+      "POST",
+      `/api/issues/${issueId}/comments`,
+      { body },
+    );
   }
 
   // ── Organization & Goals ──────────────────────────────────────────────
 
   /**
-   * Get organization summary including active goals.
+   * Get the org chart tree for the company.
+   * Real endpoint: GET /api/companies/:companyId/org
    */
-  async getOrg(): Promise<PaperclipOrg> {
-    return this.request<PaperclipOrg>("GET", `/api/v1/orgs/${this.orgId}`);
+  async getOrgTree(): Promise<OrgNode> {
+    return this.request<OrgNode>(
+      "GET",
+      `/api/companies/${this.companyId}/org`,
+    );
   }
 
   /**
-   * List goals for the organization.
+   * List goals for the company.
+   * Real endpoint: GET /api/companies/:companyId/goals
    */
   async listGoals(): Promise<PaperclipGoal[]> {
-    return this.request<PaperclipGoal[]>("GET", `/api/v1/orgs/${this.orgId}/goals`);
+    return this.request<PaperclipGoal[]>(
+      "GET",
+      `/api/companies/${this.companyId}/goals`,
+    );
   }
 
   // ── Health Check ──────────────────────────────────────────────────────
 
   /**
    * Ping the Paperclip server — returns true if it responds with 2xx.
+   * Real endpoint: GET /api/health ✅
    */
   async ping(): Promise<boolean> {
     try {
-      await this.request<unknown>("GET", "/api/v1/health");
+      await this.request<unknown>("GET", "/api/health");
       return true;
     } catch {
       return false;
@@ -371,5 +501,12 @@ export class PaperclipClient {
    */
   get url(): string {
     return this.baseUrl;
+  }
+
+  /**
+   * Get the company ID for display/logging.
+   */
+  get company(): string {
+    return this.companyId;
   }
 }

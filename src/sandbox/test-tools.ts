@@ -46,7 +46,7 @@ async function main() {
     customAgents,
     tools: allTools,
     infiniteSessions: { enabled: false },
-    workingDirectory: config.projectRoot,
+    workingDirectory: config.targetProjectRoot,
   });
 
   console.log(`📎 Session: ${session.sessionId}`);

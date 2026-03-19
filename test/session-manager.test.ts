@@ -88,6 +88,7 @@ function makeConfig(): BmadConfig {
     reviewPassLimit: 3,
     logLevel: "warning",
     projectRoot: "/tmp/test",
+    targetProjectRoot: "/tmp/test",
     paperclip: {
       url: "http://localhost:3100",
       agentApiKey: "",

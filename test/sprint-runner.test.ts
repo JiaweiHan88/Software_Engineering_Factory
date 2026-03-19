@@ -17,10 +17,23 @@ vi.mock("@github/copilot-sdk", () => ({
   defineTool: vi.fn((_name: string, _opts: unknown) => ({ name: _name })),
 }));
 
+// Mutable ref so tests can swap the mock behavior
+const mockReviewOrchestrator = {
+  run: vi.fn(),
+};
+
+// Mock the ReviewOrchestrator class
+vi.mock("../src/quality-gates/review-orchestrator.js", () => ({
+  ReviewOrchestrator: vi.fn(() => mockReviewOrchestrator),
+}));
+
 // Mock observability to avoid side effects in tests
 vi.mock("../src/observability/tracing.js", () => ({
   traceSprintCycle: vi.fn(async (_count: number, _num: number, fn: () => Promise<void>) => fn()),
   traceStoryProcessing: vi.fn(async (_id: string, _phase: string, fn: (span: { setAttribute: () => void }) => Promise<boolean>) =>
+    fn({ setAttribute: vi.fn() } as unknown as { setAttribute: () => void }),
+  ),
+  traceQualityGate: vi.fn(async (_id: string, _pass: number, fn: (span: { setAttribute: () => void }) => Promise<unknown>) =>
     fn({ setAttribute: vi.fn() } as unknown as { setAttribute: () => void }),
   ),
 }));
@@ -32,6 +45,8 @@ vi.mock("../src/observability/metrics.js", () => ({
   recordDispatchDuration: vi.fn(),
   recordSessionOpen: vi.fn(),
   recordSessionClose: vi.fn(),
+  recordReviewPass: vi.fn(),
+  recordGateVerdict: vi.fn(),
 }));
 
 import { SprintRunner } from "../src/adapter/sprint-runner.js";
@@ -56,13 +71,16 @@ function makeConfig(overrides: Partial<BmadConfig> = {}): BmadConfig {
     reviewPassLimit: 3,
     logLevel: "warning",
     projectRoot: TEST_DIR,
+    targetProjectRoot: TEST_DIR,
     paperclip: {
       url: "http://localhost:3100",
-      apiKey: undefined,
-      orgId: "test",
-      pollIntervalMs: 5000,
+      agentApiKey: undefined,
+      companyId: "test",
+      inboxCheckIntervalMs: 15000,
       enabled: false,
       timeoutMs: 10000,
+      mode: "inbox-polling" as const,
+      webhookPort: 3200,
     },
     observability: {
       logLevel: "warn",
@@ -113,6 +131,7 @@ async function seedSprint(data: SprintStatusData): Promise<void> {
 describe("SprintRunner", () => {
   beforeEach(async () => {
     await mkdir(TEST_DIR, { recursive: true });
+    mockReviewOrchestrator.run.mockReset();
   });
 
   afterEach(async () => {
@@ -278,5 +297,98 @@ describe("SprintRunner", () => {
     const summary = await runner.getSprintSummary();
     expect(summary).toContain("Sprint #1");
     expect(summary).toContain("Stories: 0");
+  });
+
+  it("should advance a story through multiple phases in a single cycle", async () => {
+    // Simulates: ready-for-dev → dev-story → (agent changes YAML to review) → code-review → done
+    // The sprint-runner should process both phases in one cycle.
+    await seedSprint(makeSprintData([
+      { id: "S-001", title: "Multi-phase story", status: "ready-for-dev" },
+    ]));
+
+    const config = makeConfig();
+
+    // Mock dispatcher that simulates dev-story advancing YAML to "review"
+    const dispatcher = {
+      dispatch: vi.fn(async (item: WorkItem) => {
+        if (item.phase === "dev-story") {
+          const currentData = yaml.load(
+            await import("node:fs/promises").then((fs) => fs.readFile(SPRINT_STATUS_PATH, "utf-8")),
+          ) as SprintStatusData;
+          const story = currentData.sprint.stories.find((s) => s.id === item.storyId);
+          if (story) {
+            story.status = "review";
+            await writeFile(SPRINT_STATUS_PATH, yaml.dump(currentData));
+          }
+        }
+        return {
+          success: true,
+          response: `Completed ${item.phase}`,
+          agentName: "test-agent",
+          sessionId: "test-session",
+        };
+      }),
+      dispatchDirect: vi.fn(),
+    } as unknown as AgentDispatcher;
+
+    // Mock ReviewOrchestrator to approve and transition story to "done"
+    mockReviewOrchestrator.run.mockImplementation(async (opts: { storyId: string }) => {
+      const currentData = yaml.load(
+        await import("node:fs/promises").then((fs) => fs.readFile(SPRINT_STATUS_PATH, "utf-8")),
+      ) as SprintStatusData;
+      const story = currentData.sprint.stories.find((s) => s.id === opts.storyId);
+      if (story) {
+        story.status = "done";
+        await writeFile(SPRINT_STATUS_PATH, yaml.dump(currentData));
+      }
+      return { approved: true, summary: "All clear", escalated: false };
+    });
+
+    const runner = new SprintRunner(dispatcher, config);
+    const events: SprintEvent[] = [];
+
+    const doneCount = await runner.runCycle({
+      onEvent: (e) => events.push(e),
+    });
+
+    // Story should reach done in a single cycle
+    expect(doneCount).toBe(1);
+
+    // dev-story dispatched via dispatcher, code-review via ReviewOrchestrator
+    expect(dispatcher.dispatch).toHaveBeenCalledTimes(1);
+    expect(mockReviewOrchestrator.run).toHaveBeenCalledTimes(1);
+
+    // Should have two story-start events for the two phases
+    const storyStarts = events.filter(
+      (e): e is Extract<SprintEvent, { type: "story-start" }> => e.type === "story-start",
+    );
+    expect(storyStarts).toHaveLength(2);
+    expect(storyStarts[0].phase).toBe("dev-story");
+    expect(storyStarts[1].phase).toBe("code-review");
+  });
+
+  it("should stop advancing when story status does not change", async () => {
+    // Dispatch succeeds but doesn't change the YAML — runner should not loop forever
+    await seedSprint(makeSprintData([
+      { id: "S-001", title: "Stuck story", status: "ready-for-dev" },
+    ]));
+
+    const config = makeConfig();
+    const dispatcher = makeMockDispatcher(() => ({
+      success: true,
+      response: "Done but status unchanged",
+      agentName: "test-agent",
+      sessionId: "test-session",
+    }));
+    const runner = new SprintRunner(dispatcher, config);
+
+    const doneCount = await runner.runCycle({
+      onEvent: () => {},
+    });
+
+    // Should not reach done (status never changed)
+    expect(doneCount).toBe(0);
+    // Should have been dispatched exactly once (inner loop detects no status change and breaks)
+    expect(dispatcher.dispatch).toHaveBeenCalledTimes(1);
   });
 });

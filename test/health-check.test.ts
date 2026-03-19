@@ -47,13 +47,16 @@ function makeConfig(overrides: Partial<BmadConfig> = {}): BmadConfig {
     reviewPassLimit: 3,
     logLevel: "warning",
     projectRoot: TEST_DIR,
+    targetProjectRoot: TEST_DIR,
     paperclip: {
       url: "http://localhost:3100",
-      apiKey: "",
-      orgId: "test",
-      pollIntervalMs: 5000,
+      agentApiKey: "",
+      companyId: "test",
+      inboxCheckIntervalMs: 15000,
       timeoutMs: 10000,
       enabled: false,
+      mode: "inbox-polling" as const,
+      webhookPort: 3200,
     },
     observability: {
       logLevel: "info",
@@ -235,11 +238,13 @@ describe("Health Check", () => {
       const config = makeConfig({
         paperclip: {
           url: "http://localhost:19999",
-          apiKey: "",
-          orgId: "test",
-          pollIntervalMs: 5000,
+          agentApiKey: "",
+          companyId: "test",
+          inboxCheckIntervalMs: 15000,
           timeoutMs: 1000,
           enabled: true,
+          mode: "inbox-polling" as const,
+          webhookPort: 3200,
         },
       });
       const result = await checkHealth(config);

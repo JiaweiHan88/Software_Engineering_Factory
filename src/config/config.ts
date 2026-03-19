@@ -8,6 +8,31 @@
  */
 
 import { resolve } from "node:path";
+import type { LogLevel, LogFormat } from "../observability/logger.js";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Observability Configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Observability settings (logging, tracing, metrics).
+ */
+export interface ObservabilityConfig {
+  /** Structured log level */
+  logLevel: LogLevel;
+  /** Log output format */
+  logFormat: LogFormat;
+  /** Enable OpenTelemetry tracing and metrics */
+  otelEnabled: boolean;
+  /** OTLP endpoint for traces and metrics */
+  otelEndpoint: string;
+  /** Service name for OTel */
+  otelServiceName: string;
+  /** Stall detection check interval in milliseconds */
+  stallCheckIntervalMs: number;
+  /** Enable stall auto-escalation */
+  stallAutoEscalate: boolean;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Paperclip Configuration
@@ -55,6 +80,8 @@ export interface BmadConfig {
   projectRoot: string;
   /** Paperclip integration settings */
   paperclip: PaperclipConfig;
+  /** Observability settings */
+  observability: ObservabilityConfig;
 }
 
 /**
@@ -84,6 +111,15 @@ export function loadConfig(projectRoot?: string): BmadConfig {
       pollIntervalMs: Number(process.env.PAPERCLIP_POLL_INTERVAL_MS) || 5_000,
       enabled: process.env.PAPERCLIP_ENABLED === "true",
       timeoutMs: Number(process.env.PAPERCLIP_TIMEOUT_MS) || 10_000,
+    },
+    observability: {
+      logLevel: (process.env.LOG_LEVEL as LogLevel) || "info",
+      logFormat: (process.env.LOG_FORMAT as LogFormat) || "human",
+      otelEnabled: process.env.OTEL_ENABLED === "true",
+      otelEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || "http://localhost:4317",
+      otelServiceName: process.env.OTEL_SERVICE_NAME || "bmad-copilot-factory",
+      stallCheckIntervalMs: Number(process.env.STALL_CHECK_INTERVAL_MS) || 60_000,
+      stallAutoEscalate: process.env.STALL_AUTO_ESCALATE === "true",
     },
   };
 }

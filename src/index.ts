@@ -23,6 +23,10 @@ import { AgentDispatcher } from "./adapter/agent-dispatcher.js";
 import { SprintRunner } from "./adapter/sprint-runner.js";
 import { PaperclipLoop } from "./adapter/paperclip-loop.js";
 import { checkHealth, formatHealthResult } from "./adapter/health-check.js";
+import { Logger, loadLoggerConfig } from "./observability/logger.js";
+import { initTracing, shutdownTracing } from "./observability/tracing.js";
+import { initMetrics, shutdownMetrics } from "./observability/metrics.js";
+import { StallDetector } from "./observability/stall-detector.js";
 import type { SprintEvent } from "./adapter/sprint-runner.js";
 import type { PaperclipLoopEvent } from "./adapter/paperclip-loop.js";
 import type { ReviewOrchestratorEvent } from "./quality-gates/review-orchestrator.js";
@@ -175,6 +179,30 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const cliArgs = parseArgs();
 
+  // Initialize observability stack
+  Logger.configure({
+    level: config.observability.logLevel,
+    format: config.observability.logFormat,
+  });
+  const log = Logger.child("main");
+
+  if (config.observability.otelEnabled) {
+    initTracing({
+      enabled: true,
+      endpoint: config.observability.otelEndpoint,
+      serviceName: config.observability.otelServiceName,
+    });
+    initMetrics({
+      enabled: true,
+      endpoint: config.observability.otelEndpoint,
+      serviceName: config.observability.otelServiceName,
+    });
+    log.info("OpenTelemetry initialized", {
+      endpoint: config.observability.otelEndpoint,
+      service: config.observability.otelServiceName,
+    });
+  }
+
   console.log("🏭 BMAD Copilot Factory\n");
   console.log(`📁 Project root: ${config.projectRoot}`);
   console.log(`📄 Sprint status: ${config.sprintStatusPath}`);
@@ -190,6 +218,20 @@ async function main(): Promise<void> {
   const sessionManager = new SessionManager(config);
   const dispatcher = new AgentDispatcher(sessionManager, config);
   const runner = new SprintRunner(dispatcher, config);
+  const stallDetector = new StallDetector({
+    checkIntervalMs: config.observability.stallCheckIntervalMs,
+    autoEscalate: config.observability.stallAutoEscalate,
+  });
+
+  stallDetector.onStallDetected((event) => {
+    log.warn("Stall detected", {
+      storyId: event.storyId,
+      phase: event.phase,
+      stalledMinutes: event.stalledMinutes,
+      threshold: event.thresholdMinutes,
+      repeat: event.repeat,
+    });
+  });
 
   // Status mode — health check + sprint summary, then exit
   if (cliArgs.mode === "status") {
@@ -258,6 +300,7 @@ async function main(): Promise<void> {
       console.log(`\n${result.success ? "✅" : "❌"} ${result.agentName}: ${result.response.slice(0, 200)}`);
     } else {
       // Sprint cycle mode (default)
+      stallDetector.startContinuousCheck();
       const doneCount = await runner.runCycle({
         storyFilter: cliArgs.storyId,
         singlePass: true,
@@ -269,7 +312,10 @@ async function main(): Promise<void> {
       console.log(`\n📊 Sprint cycle result: ${doneCount} stories completed.`);
     }
   } finally {
+    stallDetector.stopContinuousCheck();
     await sessionManager.stop();
+    await shutdownTracing();
+    await shutdownMetrics();
     console.log("🧹 Shutdown complete.");
   }
 }

@@ -25,6 +25,11 @@ import {
 } from "../tools/index.js";
 import type { Tool } from "../tools/types.js";
 import type { SessionManager } from "./session-manager.js";
+import { Logger } from "../observability/logger.js";
+import { traceAgentDispatch } from "../observability/tracing.js";
+import { recordDispatchDuration } from "../observability/metrics.js";
+
+const log = Logger.child("agent-dispatcher");
 
 /**
  * Work item lifecycle phases.
@@ -222,42 +227,63 @@ export class AgentDispatcher {
     // Build the prompt
     const prompt = phaseConfig.buildPrompt(item, this.config);
 
-    console.log(`[dispatcher] ${item.phase} → ${agent.displayName} (story: ${item.storyId ?? "n/a"})`);
+    log.info("Dispatching work item", {
+      phase: item.phase,
+      agent: agent.displayName,
+      storyId: item.storyId ?? "n/a",
+    });
+
+    const startTime = Date.now();
 
     try {
-      // Create a session for this agent
-      const sessionId = await this.sessionManager.createAgentSession({
-        agent,
-        allAgents,
-        tools: phaseConfig.tools,
-        skillDirectories: this.skillDirs,
-      });
+      const result = await traceAgentDispatch(
+        agent.name,
+        item.phase,
+        item.storyId ?? "unknown",
+        async (span) => {
+          // Create a session for this agent
+          const sessionId = await this.sessionManager.createAgentSession({
+            agent,
+            allAgents,
+            tools: phaseConfig.tools,
+            skillDirectories: this.skillDirs,
+          });
 
-      // Track story association
-      if (item.storyId) {
-        this.sessionManager.setSessionStory(sessionId, item.storyId);
-      }
+          // Track story association
+          if (item.storyId) {
+            this.sessionManager.setSessionStory(sessionId, item.storyId);
+          }
 
-      // Send the prompt
-      const response = await this.sessionManager.sendAndWait(
-        sessionId,
-        prompt,
-        120_000,
-        onDelta,
+          // Send the prompt
+          const response = await this.sessionManager.sendAndWait(
+            sessionId,
+            prompt,
+            120_000,
+            onDelta,
+          );
+
+          // Close the session (one-shot per phase)
+          await this.sessionManager.closeSession(sessionId);
+
+          span.setAttribute("dispatch.success", true);
+          span.setAttribute("response.length", response.length);
+
+          return {
+            success: true,
+            response,
+            agentName: agent.name,
+            sessionId,
+          } as DispatchResult;
+        },
       );
 
-      // Close the session (one-shot per phase)
-      await this.sessionManager.closeSession(sessionId);
-
-      return {
-        success: true,
-        response,
-        agentName: agent.name,
-        sessionId,
-      };
+      recordDispatchDuration(agent.name, item.phase, Date.now() - startTime, true);
+      return result;
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[dispatcher] Error dispatching ${item.phase}: ${errorMsg}`);
+      const durationMs = Date.now() - startTime;
+      recordDispatchDuration(agent.name, item.phase, durationMs, false);
+      log.error("Dispatch failed", { phase: item.phase, agent: agent.name, durationMs }, err instanceof Error ? err : undefined);
       return {
         success: false,
         response: "",

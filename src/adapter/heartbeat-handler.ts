@@ -16,6 +16,9 @@ import { getAgent } from "../agents/registry.js";
 import type { AgentDispatcher, WorkPhase } from "./agent-dispatcher.js";
 import type { PaperclipHeartbeat } from "./paperclip-client.js";
 import type { PaperclipReporter } from "./reporter.js";
+import { Logger } from "../observability/logger.js";
+
+const log = Logger.child("heartbeat-handler");
 
 export interface HeartbeatContext {
   /** Paperclip agent ID */
@@ -71,9 +74,11 @@ export async function handleHeartbeat(
   // 3. Determine the BMAD workflow phase
   const phase = ctx.ticket.phase ?? inferPhaseFromRole(ctx.bmadRole);
 
-  console.log(
-    `[heartbeat] ${agent.displayName} | ${phase} | ticket: ${ctx.ticket.id}`,
-  );
+  log.info("Processing heartbeat", {
+    agent: agent.displayName,
+    phase,
+    ticketId: ctx.ticket.id,
+  });
 
   // 4. Dispatch to the agent
   const result = await dispatcher.dispatch(

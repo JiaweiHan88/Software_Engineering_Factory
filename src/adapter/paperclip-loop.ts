@@ -28,6 +28,9 @@ import type { PaperclipHeartbeat } from "./paperclip-client.js";
 import { PaperclipReporter } from "./reporter.js";
 import { handlePaperclipHeartbeat } from "./heartbeat-handler.js";
 import type { HeartbeatResult } from "./heartbeat-handler.js";
+import { Logger } from "../observability/logger.js";
+
+const log = Logger.child("paperclip-loop");
 import { allAgents } from "../agents/registry.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -137,18 +140,16 @@ export class PaperclipLoop {
 
     // 2. Start the Copilot SDK
     if (!this.sessionManager.isReady) {
-      console.log("[paperclip-loop] Starting Copilot SDK...");
+      log.info("Starting Copilot SDK");
       await this.sessionManager.start();
-      console.log("[paperclip-loop] ✅ SDK ready.");
+      log.info("SDK ready");
     }
 
     // Get agent IDs for polling
     const agentIds = allAgents.map((a) => a.name);
 
     onEvent?.({ type: "loop-start", agentCount: agentIds.length });
-    console.log(
-      `[paperclip-loop] 🔄 Starting heartbeat loop (poll every ${pollIntervalMs}ms, agents: ${agentIds.join(", ")})`,
-    );
+    log.info("Starting heartbeat loop", { pollIntervalMs, agents: agentIds });
 
     // 3. Poll loop
     let cycle = 0;
@@ -176,7 +177,7 @@ export class PaperclipLoop {
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         onEvent?.({ type: "poll-error", error: errorMsg });
-        console.error(`[paperclip-loop] Poll error: ${errorMsg}`);
+        log.error("Poll error", {}, err instanceof Error ? err : undefined);
 
         // Back off on errors
         await this.sleep(pollIntervalMs * 2);
@@ -186,14 +187,14 @@ export class PaperclipLoop {
     }
 
     this.running = false;
-    console.log("[paperclip-loop] Loop stopped.");
+    log.info("Loop stopped");
   }
 
   /**
    * Stop the Paperclip integration loop gracefully.
    */
   async stop(): Promise<void> {
-    console.log("[paperclip-loop] Stopping...");
+    log.info("Stopping loop");
     this.running = false;
     this.abortController?.abort();
 
@@ -208,7 +209,7 @@ export class PaperclipLoop {
 
     // Stop the SDK
     await this.sessionManager.stop();
-    console.log("[paperclip-loop] Shutdown complete.");
+    log.info("Shutdown complete");
   }
 
   /**
@@ -254,12 +255,10 @@ export class PaperclipLoop {
           },
         });
         registered++;
-        console.log(`[paperclip-loop] Registered agent: ${agent.displayName}`);
+        log.info("Registered agent", { agent: agent.displayName });
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
-        console.error(
-          `[paperclip-loop] Failed to register ${agent.displayName}: ${errorMsg}`,
-        );
+        log.error("Failed to register agent", { agent: agent.displayName, error: errorMsg });
       }
     }
 
@@ -303,9 +302,7 @@ export class PaperclipLoop {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       onEvent?.({ type: "heartbeat-error", agentId: heartbeat.agentId, error: errorMsg });
-      console.error(
-        `[paperclip-loop] Heartbeat error for ${heartbeat.agentId}: ${errorMsg}`,
-      );
+      log.error("Heartbeat processing error", { agentId: heartbeat.agentId }, err instanceof Error ? err : undefined);
 
       // Mark agent as stalled
       try {

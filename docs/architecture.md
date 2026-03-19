@@ -105,12 +105,74 @@ src/
 │       ├── index.ts # stdio MCP server entry point
 │       └── tools.ts # 5 tool handlers (sprint, stories, arch docs)
 │
+├── observability/   # Production observability stack
+│   ├── index.ts     # Barrel exports
+│   ├── logger.ts    # Structured JSON/human-readable logger
+│   ├── tracing.ts   # OpenTelemetry distributed tracing
+│   ├── metrics.ts   # OTel counters, histograms, gauges
+│   └── stall-detector.ts  # Stuck story detection & alerting
+│
+├── quality-gates/   # BMAD adversarial review system
+│   ├── types.ts     # Severity, findings, verdicts
+│   ├── engine.ts    # Pure gate evaluation logic
+│   ├── review-orchestrator.ts  # Multi-pass review loop
+│   └── tool.ts      # Copilot SDK quality_gate_evaluate tool
+│
 ├── config/          # Runtime configuration
+│   ├── config.ts    # BmadConfig with env loading
+│   └── model-strategy.ts  # Complexity→model tier routing
 │
 └── sandbox/         # Smoke-test scripts
     ├── hello-copilot.ts
     └── test-agent.ts
 ```
+
+## Observability Architecture (Phase 7)
+
+### Structured Logging
+
+All modules use `Logger.child("component-name")` for structured output:
+- **JSON mode** (`LOG_FORMAT=json`) — one JSON object per line, for Grafana Loki / log aggregators
+- **Human mode** (`LOG_FORMAT=human`) — colored, timestamped, for local development
+
+### Distributed Tracing (OpenTelemetry)
+
+When `OTEL_ENABLED=true`, spans are exported via OTLP to Jaeger/Grafana Tempo:
+```
+sprint.cycle (root)
+  ├── story.process (per story)
+  │   └── agent.dispatch (per phase)
+  └── quality_gate.evaluate (per review pass)
+```
+
+### Metrics (OpenTelemetry)
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `bmad.stories.processed` | Counter | Stories processed by phase |
+| `bmad.stories.done` | Counter | Stories reaching done |
+| `bmad.agent.dispatch_duration` | Histogram | Agent dispatch latency (ms) |
+| `bmad.review.passes` | Counter | Review passes executed |
+| `bmad.gate.verdicts` | Counter | Gate verdicts by outcome |
+| `bmad.sessions.active` | UpDownCounter | Active Copilot SDK sessions |
+| `bmad.stall.detections` | Counter | Stalled stories detected |
+| `bmad.sprint.cycles` | Counter | Sprint cycles executed |
+
+### Stall Detection
+
+Monitors stories stuck in a phase beyond configurable thresholds:
+- `ready-for-dev`: 30 min (default)
+- `in-progress`: 60 min (default)
+- `review`: 30 min (default)
+
+### Model Strategy (BYOK Cost Routing)
+
+Complexity-based model selection with 3 tiers:
+| Tier | Copilot Model | BYOK Anthropic | BYOK OpenAI | Used For |
+|------|--------------|----------------|-------------|----------|
+| fast | gpt-4o-mini | claude-haiku-3.5 | gpt-4o-mini | Status checks, simple queries |
+| standard | claude-sonnet-4.5 | claude-sonnet-4.5 | gpt-4o | Code generation, normal dev |
+| powerful | claude-sonnet-4.5 | claude-opus-4 | o3 | Architecture, security audit |
 
 ## Key Design Decisions
 
@@ -122,6 +184,11 @@ src/
 | Adversarial code review | BMAD's quality-gated loop prevents regressions |
 | TypeScript throughout | Type safety for agent/tool interfaces, SDK is TS-first |
 | ESM modules | Modern module system, tree-shakeable, SDK compatible |
+| OpenTelemetry for observability | Vendor-neutral, exports to Jaeger/Grafana/Prometheus |
+| Structured logging over console.log | Machine-parseable JSON for production, human-readable for dev |
+| Complexity-based model routing | Optimizes cost: fast tier for simple tasks, powerful for complex |
+| BYOK cost routing | Preserves Copilot quota for interactive work, routes batch to BYOK |
+| Stall detection | Prevents stories stuck in a phase indefinitely; auto-escalation |
 
 ## Security Considerations
 

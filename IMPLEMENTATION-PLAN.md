@@ -19,7 +19,7 @@
 | **Phase 4** — Paperclip Integration | — | ✅ Complete |
 | **Phase 5** — MCP Server | — | ✅ Complete |
 | **Phase 6** — Quality Gates | — | ✅ Complete |
-| **Phase 7** — Production Hardening | — | 🔜 Next |
+| **Phase 7** — Production Hardening | — | ✅ Complete |
 
 ---
 
@@ -422,7 +422,7 @@ story status = "review"
 
 ---
 
-### Phase 7 — Production Hardening *(ongoing)*
+### Phase 7 — Production Hardening *(complete)*
 
 **Goal:** Observability, cost optimization, stall detection.
 
@@ -430,6 +430,83 @@ story status = "review"
 - BYOK cost routing per agent (expensive ops → BYOK, cheap → Copilot quota)
 - Stall detection ported from Claw Loop
 - Model strategy (complexity → model tier) from BMAD V6
+
+#### Phase 7 — Delivery Summary
+
+**Delivered modules:**
+
+| Module | File | Description |
+|--------|------|-------------|
+| Structured Logger | `src/observability/logger.ts` | JSON + human-readable log output with levels, component context, timestamps |
+| OTel Tracing | `src/observability/tracing.ts` | Distributed tracing with spans for sprint cycles, story processing, agent dispatches, quality gates |
+| OTel Metrics | `src/observability/metrics.ts` | Counters, histograms, gauges for stories, dispatches, sessions, stalls, verdicts |
+| Stall Detector | `src/observability/stall-detector.ts` | Monitors stories stuck in a phase beyond configurable thresholds; repeat detection |
+| Model Strategy | `src/config/model-strategy.ts` | Complexity → model tier routing with BYOK provider selection |
+| Barrel Export | `src/observability/index.ts` | Module barrel export for all observability components |
+| Vitest Config | `vitest.config.ts` | Test framework configuration with v8 coverage |
+
+**Updated modules:**
+
+| Module | Changes |
+|--------|---------|
+| `src/config/config.ts` | Extended `BmadConfig` with `ObservabilityConfig` (log level/format, OTel settings, stall thresholds) |
+| `src/config/index.ts` | Re-exports `ObservabilityConfig`, `ModelStrategy` types and functions |
+| `src/index.ts` | Initializes Logger, OTel tracing/metrics, StallDetector on startup; graceful OTel shutdown |
+| `src/adapter/sprint-runner.ts` | Replaced `console.*` with structured logger; added OTel span tracing per sprint cycle and story; records metrics |
+| `src/adapter/agent-dispatcher.ts` | Replaced `console.*` with structured logger; added OTel span tracing per dispatch; records dispatch duration metrics |
+| `src/adapter/session-manager.ts` | Replaced `console.*` with structured logger; records session open/close metrics |
+| `docs/architecture.md` | Added Observability Architecture section (logging, tracing, metrics, stall detection, model strategy) |
+| `package.json` | Added 8 `@opentelemetry/*` dependencies |
+
+**Test suite:**
+
+| Test File | Tests | Coverage |
+|-----------|-------|----------|
+| `test/quality-gate-engine.test.ts` | 24 | Gate evaluation, severity scoring, verdict logic |
+| `test/model-strategy.test.ts` | 22 | Complexity classification, model selection, BYOK routing |
+| `test/stall-detector.test.ts` | 12 | Phase tracking, threshold detection, repeat flagging |
+| `test/logger.test.ts` | 9 | Level filtering, JSON/human format, error output |
+| **Total** | **67** | All passing ✅ |
+
+**New environment variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOG_LEVEL` | `info` | Structured log level: debug, info, warn, error |
+| `LOG_FORMAT` | `human` | Log output format: json, human |
+| `OTEL_ENABLED` | `false` | Enable OpenTelemetry tracing and metrics |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP endpoint for traces/metrics |
+| `OTEL_SERVICE_NAME` | `bmad-copilot-factory` | Service name for OTel |
+| `STALL_CHECK_INTERVAL_MS` | `60000` | Stall detection check interval |
+| `STALL_AUTO_ESCALATE` | `false` | Auto-escalate stalled stories |
+| `MODEL_DEFAULT_TIER` | `standard` | Default model tier |
+| `MODEL_PREFER_BYOK` | `false` | Prefer BYOK providers over Copilot quota |
+| `ANTHROPIC_API_KEY` | *(none)* | Enables Anthropic BYOK tier |
+| `OPENAI_API_KEY` | *(none)* | Enables OpenAI BYOK tier |
+| `MODEL_TIER_FAST` | `gpt-4o-mini` | Override fast tier Copilot model |
+| `MODEL_TIER_STANDARD` | `claude-sonnet-4.5` | Override standard tier Copilot model |
+| `MODEL_TIER_POWERFUL` | `claude-sonnet-4.5` | Override powerful tier Copilot model |
+
+**Model tier routing:**
+
+| Tier | Phase Mapping | BYOK Anthropic | BYOK OpenAI | Copilot Default |
+|------|--------------|----------------|-------------|-----------------|
+| fast | sprint-status | claude-haiku-3.5 | gpt-4o-mini | gpt-4o-mini |
+| standard | create-story, dev-story, sprint-planning | claude-sonnet-4.5 | gpt-4o | claude-sonnet-4.5 |
+| powerful | code-review, security, architecture | claude-opus-4 | o3 | claude-sonnet-4.5 |
+
+**OTel metrics registered:**
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `bmad.stories.processed` | Counter | story.id, story.phase |
+| `bmad.stories.done` | Counter | story.id |
+| `bmad.agent.dispatch_duration` | Histogram | agent.name, agent.phase, dispatch.success |
+| `bmad.review.passes` | Counter | story.id, review.pass_number |
+| `bmad.gate.verdicts` | Counter | story.id, gate.verdict, gate.score |
+| `bmad.sessions.active` | UpDownCounter | agent.name |
+| `bmad.stall.detections` | Counter | story.id, story.phase, stall.duration_minutes |
+| `bmad.sprint.cycles` | Counter | sprint.number, sprint.stories_processed |
 
 ---
 

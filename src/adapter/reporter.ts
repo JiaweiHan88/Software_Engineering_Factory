@@ -17,6 +17,9 @@ import type { PaperclipClient, PaperclipStatusReport, PaperclipTicket } from "./
 import type { DispatchResult } from "./agent-dispatcher.js";
 import type { HeartbeatResult } from "./heartbeat-handler.js";
 import type { SprintEvent } from "./sprint-runner.js";
+import { Logger } from "../observability/logger.js";
+
+const log = Logger.child("reporter");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Report History
@@ -164,7 +167,7 @@ export class PaperclipReporter {
       case "sprint-start":
       case "sprint-complete":
       case "sprint-idle":
-        console.log(`[reporter] Sprint event: ${event.type}`);
+        log.debug("Sprint event", { type: event.type });
         break;
 
       default:
@@ -190,15 +193,18 @@ export class PaperclipReporter {
     try {
       await this.client.reportStatus(report);
       entry.success = true;
-      console.log(
-        `[reporter] ✅ Reported: ${report.agentId} → ${report.ticketId} (${report.status})`,
-      );
+      log.info("Reported status", {
+        agentId: report.agentId,
+        ticketId: report.ticketId,
+        status: report.status,
+      });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       entry.error = errorMsg;
-      console.error(
-        `[reporter] ❌ Failed to report: ${report.agentId} → ${report.ticketId}: ${errorMsg}`,
-      );
+      log.error("Failed to report status", {
+        agentId: report.agentId,
+        ticketId: report.ticketId,
+      }, err instanceof Error ? err : undefined);
     }
 
     this.addToHistory(entry);
@@ -213,10 +219,10 @@ export class PaperclipReporter {
   ): Promise<void> {
     try {
       await this.client.updateTicket(ticketId, { status });
-      console.log(`[reporter] Ticket ${ticketId} → ${status}`);
+      log.info("Ticket status updated", { ticketId, status });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[reporter] Failed to update ticket ${ticketId}: ${errorMsg}`);
+      log.error("Failed to update ticket", { ticketId, status, error: errorMsg });
     }
   }
 

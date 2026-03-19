@@ -23,6 +23,11 @@ import type { BmadConfig } from "../config/config.js";
 import type { AgentDispatcher, DispatchResult, WorkPhase } from "./agent-dispatcher.js";
 import { ReviewOrchestrator } from "../quality-gates/review-orchestrator.js";
 import type { ReviewOrchestratorEvent } from "../quality-gates/review-orchestrator.js";
+import { Logger } from "../observability/logger.js";
+import { traceSprintCycle, traceStoryProcessing } from "../observability/tracing.js";
+import { recordStoryProcessed, recordStoryDone, recordSprintCycle } from "../observability/metrics.js";
+
+const log = Logger.child("sprint-runner");
 
 /**
  * Sprint runner lifecycle events.
@@ -101,22 +106,55 @@ export class SprintRunner {
     }
 
     onEvent?.({ type: "sprint-start", storyCount: actionable.length });
+    log.info("Sprint cycle starting", {
+      sprintNumber: sprintData.sprint.number,
+      storyCount: actionable.length,
+      stories: actionable.map((s) => s.id),
+    });
 
     let doneCount = 0;
 
-    for (const story of actionable) {
-      try {
-        const advanced = await this.advanceStory(story, { onDelta, onEvent, live });
-        if (advanced) doneCount++;
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        onEvent?.({ type: "story-failed", storyId: story.id, error: errorMsg });
-        console.error(`[sprint-runner] Story ${story.id} failed: ${errorMsg}`);
+    const processCycle = async () => {
+      for (const story of actionable) {
+        try {
+          const advanced = await traceStoryProcessing(
+            story.id,
+            this.nextPhase(story) ?? "unknown",
+            async (span) => {
+              const result = await this.advanceStory(story, { onDelta, onEvent, live });
+              recordStoryProcessed(story.id, this.nextPhase(story) ?? "unknown");
+              if (result) {
+                recordStoryDone(story.id);
+                span.setAttribute("story.done", true);
+              }
+              return result;
+            },
+          );
+          if (advanced) doneCount++;
+        } catch (err) {
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          onEvent?.({ type: "story-failed", storyId: story.id, error: errorMsg });
+          log.error("Story processing failed", { storyId: story.id }, err instanceof Error ? err : undefined);
+        }
       }
-    }
+    };
+
+    // Wrap in sprint cycle trace if OTel is active
+    await traceSprintCycle(
+      actionable.length,
+      sprintData.sprint.number,
+      async () => { await processCycle(); },
+    );
+
+    recordSprintCycle(sprintData.sprint.number, actionable.length);
 
     onEvent?.({
       type: "sprint-complete",
+      storiesProcessed: actionable.length,
+      storiesDone: doneCount,
+    });
+
+    log.info("Sprint cycle complete", {
       storiesProcessed: actionable.length,
       storiesDone: doneCount,
     });
@@ -138,7 +176,7 @@ export class SprintRunner {
     // Determine the next phase based on current status
     const phase = this.nextPhase(story);
     if (!phase) {
-      console.log(`[sprint-runner] Story ${story.id} (${story.status}) — no next phase.`);
+      log.debug("No next phase for story", { storyId: story.id, status: story.status });
       return story.status === "done";
     }
 
@@ -158,7 +196,7 @@ export class SprintRunner {
     onEvent?.({ type: "story-start", storyId: story.id, phase });
 
     if (!live) {
-      console.log(`[sprint-runner] [DRY RUN] Would dispatch ${phase} for ${story.id}`);
+      log.info("Dry run — skipping dispatch", { storyId: story.id, phase });
       onEvent?.({
         type: "story-complete",
         storyId: story.id,
@@ -214,7 +252,7 @@ export class SprintRunner {
     onEvent?.({ type: "story-complete", storyId: story.id, phase, result });
 
     if (!result.success) {
-      console.error(`[sprint-runner] ${phase} failed for ${story.id}: ${result.error}`);
+      log.error("Dispatch failed for story", { storyId: story.id, phase, error: result.error });
       return false;
     }
 
@@ -243,7 +281,7 @@ export class SprintRunner {
       case "done":
         return null; // Nothing to do
       default:
-        console.warn(`[sprint-runner] Unknown status: ${story.status} for ${story.id}`);
+        log.warn("Unknown story status", { storyId: story.id, status: story.status });
         return null;
     }
   }

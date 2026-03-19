@@ -19,6 +19,10 @@ import type { Tool } from "../tools/types.js";
 import type { BmadAgent } from "../agents/types.js";
 import type { BmadConfig } from "../config/config.js";
 import { buildClientEnv } from "../config/config.js";
+import { Logger } from "../observability/logger.js";
+import { recordSessionOpen, recordSessionClose } from "../observability/metrics.js";
+
+const log = Logger.child("session-manager");
 
 /**
  * Options for creating a new agent session.
@@ -90,7 +94,7 @@ export class SessionManager {
 
     // Verify connectivity
     const ping = await this.client.ping("bmad-session-manager");
-    console.log(`[session-mgr] Copilot CLI started (ping: ${new Date(ping.timestamp).toISOString()})`);
+    log.info("Copilot CLI started", { pingTimestamp: new Date(ping.timestamp).toISOString() });
   }
 
   /**
@@ -150,7 +154,8 @@ export class SessionManager {
     };
     this.sessions.set(session.sessionId, tracked);
 
-    console.log(`[session-mgr] Session ${session.sessionId} created for ${agent.displayName}`);
+    log.info("Session created", { sessionId: session.sessionId, agent: agent.displayName });
+    recordSessionOpen(agent.name);
     return session.sessionId;
   }
 
@@ -214,7 +219,8 @@ export class SessionManager {
 
     await tracked.session.disconnect();
     this.sessions.delete(sessionId);
-    console.log(`[session-mgr] Session ${sessionId} closed (${tracked.agentName}, ${tracked.messageCount} messages)`);
+    log.info("Session closed", { sessionId, agent: tracked.agentName, messageCount: tracked.messageCount });
+    recordSessionClose(tracked.agentName);
   }
 
   /**
@@ -232,7 +238,7 @@ export class SessionManager {
       this.client = null;
     }
     this.started = false;
-    console.log("[session-mgr] Stopped.");
+    log.info("Session manager stopped");
   }
 
   /**

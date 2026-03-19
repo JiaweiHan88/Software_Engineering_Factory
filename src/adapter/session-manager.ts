@@ -8,13 +8,17 @@
  * - Single CopilotClient instance (one CLI process)
  * - Session creation with agent persona + tools + skills
  * - Session caching for multi-turn within same story
+ * - Session resume across process restarts and Paperclip heartbeats
  * - Graceful shutdown
  *
  * @module adapter/session-manager
  */
 
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { CopilotClient, approveAll } from "@github/copilot-sdk";
-import type { CopilotSession, CustomAgentConfig, SessionConfig } from "@github/copilot-sdk";
+import type { CopilotSession, CustomAgentConfig, ResumeSessionConfig, SessionConfig } from "@github/copilot-sdk";
 import type { Tool } from "../tools/types.js";
 import type { BmadAgent } from "../agents/types.js";
 import type { BmadConfig } from "../config/config.js";
@@ -23,6 +27,15 @@ import { Logger } from "../observability/logger.js";
 import { recordSessionOpen, recordSessionClose } from "../observability/metrics.js";
 
 const log = Logger.child("session-manager");
+
+/** Filename for the persisted session index stored in outputDir. */
+const SESSION_INDEX_FILE = "session-index.json";
+
+/**
+ * Persisted map of `${agentName}:${storyId}` → Copilot session ID.
+ * Written to disk so sessions can be resumed after process restarts.
+ */
+type SessionIndexMap = Record<string, string>;
 
 /**
  * Options for creating a new agent session.
@@ -40,6 +53,11 @@ export interface AgentSessionOptions {
   model?: string;
   /** System message to append (e.g., sprint context) */
   systemMessage?: string;
+  /**
+   * Story ID to associate with this session.
+   * Used by getOrCreateAgentSession() to attempt session resume.
+   */
+  storyId?: string;
 }
 
 /**
@@ -70,6 +88,8 @@ export class SessionManager {
   private sessions = new Map<string, TrackedSession>();
   private config: BmadConfig;
   private started = false;
+  /** Lazy-loaded in-memory cache of the on-disk session index. */
+  private sessionIndexCache: SessionIndexMap | null = null;
 
   constructor(config: BmadConfig) {
     this.config = config;
@@ -95,6 +115,48 @@ export class SessionManager {
     // Verify connectivity
     const ping = await this.client.ping("bmad-session-manager");
     log.info("Copilot CLI started", { pingTimestamp: new Date(ping.timestamp).toISOString() });
+  }
+
+  /**
+   * Load the session index from disk (or return cached copy).
+   *
+   * @returns Map of `${agentName}:${storyId}` → Copilot session ID
+   */
+  private async loadSessionIndex(): Promise<SessionIndexMap> {
+    if (this.sessionIndexCache !== null) return this.sessionIndexCache;
+
+    const filePath = join(this.config.outputDir, SESSION_INDEX_FILE);
+    if (!existsSync(filePath)) {
+      this.sessionIndexCache = {};
+      return this.sessionIndexCache;
+    }
+
+    try {
+      const raw = await readFile(filePath, "utf-8");
+      this.sessionIndexCache = JSON.parse(raw) as SessionIndexMap;
+      return this.sessionIndexCache;
+    } catch (err) {
+      log.warn("Failed to parse session index, starting fresh", { error: String(err) });
+      this.sessionIndexCache = {};
+      return this.sessionIndexCache;
+    }
+  }
+
+  /**
+   * Persist the session index to disk.
+   *
+   * @param index - Updated session index map to write
+   */
+  private async saveSessionIndex(index: SessionIndexMap): Promise<void> {
+    this.sessionIndexCache = index;
+    const dir = this.config.outputDir;
+    const filePath = join(dir, SESSION_INDEX_FILE);
+    try {
+      await mkdir(dir, { recursive: true });
+      await writeFile(filePath, JSON.stringify(index, null, 2), "utf-8");
+    } catch (err) {
+      log.warn("Failed to persist session index", { error: String(err) });
+    }
   }
 
   /**
@@ -152,11 +214,101 @@ export class SessionManager {
       createdAt: new Date(),
       messageCount: 0,
     };
+
+    // Propagate storyId onto the tracked record when provided directly
+    if (opts.storyId) {
+      tracked.storyId = opts.storyId;
+    }
+
     this.sessions.set(session.sessionId, tracked);
 
     log.info("Session created", { sessionId: session.sessionId, agent: agent.displayName });
     recordSessionOpen(agent.name);
     return session.sessionId;
+  }
+
+  /**
+   * Resume-aware session creation.
+   *
+   * If `opts.storyId` is provided the method checks the persisted session index
+   * for an existing Copilot session ID and attempts to resume it.  On failure
+   * (or when no prior session exists) a fresh session is created and its ID is
+   * saved to the index for future restarts.
+   *
+   * When `opts.storyId` is absent the call delegates directly to
+   * `createAgentSession`.
+   *
+   * @param opts - Agent, tools, skills, and optional resume hints
+   * @returns Session ID for tracking
+   */
+  async getOrCreateAgentSession(opts: AgentSessionOptions): Promise<string> {
+    if (!opts.storyId) {
+      return this.createAgentSession(opts);
+    }
+
+    const key = `${opts.agent.name}:${opts.storyId}`;
+    const index = await this.loadSessionIndex();
+    const existingId = index[key];
+
+    // Build shared resume-config pieces up front
+    const customAgents: CustomAgentConfig[] = opts.allAgents.map((a) => ({
+      name: a.name,
+      displayName: a.displayName,
+      description: a.description,
+      prompt: a.prompt,
+    }));
+
+    if (existingId) {
+      try {
+        const resumeConfig: ResumeSessionConfig = {
+          onPermissionRequest: approveAll,
+          customAgents,
+          tools: opts.tools,
+          workingDirectory: this.config.projectRoot,
+          ...(opts.skillDirectories ? { skillDirectories: opts.skillDirectories } : {}),
+          ...(opts.systemMessage ? { systemMessage: { mode: "append", content: opts.systemMessage } } : {}),
+        };
+
+        const session = await this.client!.resumeSession(existingId, resumeConfig);
+
+        if (opts.model) await session.setModel(opts.model);
+
+        const tracked: TrackedSession = {
+          session,
+          agentName: opts.agent.name,
+          storyId: opts.storyId,
+          createdAt: new Date(),
+          messageCount: 0,
+        };
+        this.sessions.set(session.sessionId, tracked);
+
+        // The SDK may assign a new session ID upon resume — keep the index current.
+        if (session.sessionId !== existingId) {
+          index[key] = session.sessionId;
+          await this.saveSessionIndex(index);
+        }
+
+        log.info("Session resumed", {
+          sessionId: session.sessionId,
+          agent: opts.agent.displayName,
+          storyId: opts.storyId,
+        });
+        recordSessionOpen(opts.agent.name);
+        return session.sessionId;
+      } catch (err) {
+        log.warn("Session resume failed, creating new session", {
+          existingId,
+          error: String(err),
+        });
+        // Fall through to create a new session below
+      }
+    }
+
+    // Create a brand-new session and persist the mapping
+    const newSessionId = await this.createAgentSession(opts);
+    index[key] = newSessionId;
+    await this.saveSessionIndex(index);
+    return newSessionId;
   }
 
   /**
@@ -212,8 +364,12 @@ export class SessionManager {
 
   /**
    * Close a specific session.
+   *
+   * @param sessionId - Session ID to close
+   * @param removeFromIndex - When true, removes the session mapping from the
+   *   persisted index so it will not be resumed on next startup.
    */
-  async closeSession(sessionId: string): Promise<void> {
+  async closeSession(sessionId: string, removeFromIndex = false): Promise<void> {
     const tracked = this.sessions.get(sessionId);
     if (!tracked) return;
 
@@ -221,6 +377,13 @@ export class SessionManager {
     this.sessions.delete(sessionId);
     log.info("Session closed", { sessionId, agent: tracked.agentName, messageCount: tracked.messageCount });
     recordSessionClose(tracked.agentName);
+
+    if (removeFromIndex && tracked.storyId) {
+      const index = await this.loadSessionIndex();
+      const key = `${tracked.agentName}:${tracked.storyId}`;
+      delete index[key];
+      await this.saveSessionIndex(index);
+    }
   }
 
   /**

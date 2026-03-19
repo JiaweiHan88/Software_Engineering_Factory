@@ -234,13 +234,34 @@ export class PaperclipClient {
   // ── Agent Management ──────────────────────────────────────────────────
 
   /**
-   * Create (hire) a new agent in the company.
-   * Real endpoint: POST /api/companies/:companyId/agents
+   * Hire a new agent in the company.
+   *
+   * Uses POST /api/companies/:companyId/agent-hires (not /agents).
+   * The /agents endpoint requires board-level auth, but /agent-hires
+   * respects the `canCreateAgents` permission on the calling agent —
+   * which is what we need for the CEO agent to create BMAD sub-agents.
+   *
+   * Body matches `createAgentHireSchema`:
+   *   name (required), role?, title?, adapterType?, adapterConfig?,
+   *   runtimeConfig?, capabilities?, reportsTo?, budgetMonthlyCents?,
+   *   permissions?, metadata?, sourceIssueId?, sourceIssueIds?
    */
-  async createAgent(agent: Omit<PaperclipAgent, "id" | "createdAt" | "updatedAt">): Promise<PaperclipAgent> {
+  async createAgent(agent: {
+    name: string;
+    role?: string;
+    title?: string;
+    adapterType?: string;
+    adapterConfig?: Record<string, unknown>;
+    runtimeConfig?: Record<string, unknown>;
+    capabilities?: string;
+    reportsTo?: string;
+    budgetMonthlyCents?: number;
+    permissions?: { canCreateAgents?: boolean };
+    metadata?: Record<string, unknown>;
+  }): Promise<PaperclipAgent> {
     return this.request<PaperclipAgent>(
       "POST",
-      `/api/companies/${this.companyId}/agents`,
+      `/api/companies/${this.companyId}/agent-hires`,
       agent,
     );
   }

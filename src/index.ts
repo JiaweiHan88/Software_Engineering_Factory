@@ -16,6 +16,8 @@
  * @module index
  */
 
+import "dotenv/config";
+
 import { loadConfig } from "./config/config.js";
 import { allAgents } from "./agents/registry.js";
 import { SessionManager } from "./adapter/session-manager.js";

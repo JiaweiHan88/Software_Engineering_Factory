@@ -256,23 +256,36 @@ export class PaperclipLoop {
   /**
    * Create all BMAD agents in Paperclip.
    *
-   * Uses POST /api/companies/:companyId/agents (real endpoint).
-   * Replaces the old registerAgent() which called PUT /api/v1/agents/:id.
+   * Uses POST /api/companies/:companyId/agent-hires (the hire flow).
+   * The /agents endpoint requires board-level auth; /agent-hires works
+   * with agent API keys that have the `canCreateAgents` permission.
    */
   private async createAllAgents(
     onEvent?: PaperclipLoopEventHandler,
   ): Promise<void> {
+    // Map BMAD agent names to Paperclip role enum values
+    const roleMap: Record<string, string> = {
+      "bmad-analyst": "researcher",
+      "bmad-architect": "engineer",
+      "bmad-dev": "engineer",
+      "bmad-pm": "pm",
+      "bmad-qa": "qa",
+      "bmad-quick-flow-solo-dev": "engineer",
+      "bmad-sm": "pm",
+      "bmad-tech-writer": "general",
+      "bmad-ux-designer": "designer",
+    };
+
     let created = 0;
     for (const agent of allAgents) {
       try {
         await this.client.createAgent({
           name: agent.displayName,
+          role: roleMap[agent.name] ?? "general",
           title: agent.name,
-          companyId: this.config.paperclip.companyId,
-          status: "active",
-          heartbeatEnabled: true,
+          adapterType: "process",
+          capabilities: agent.description,
           metadata: {
-            description: agent.description,
             bmadMethodology: "v6",
             bmadRole: agent.name,
           },

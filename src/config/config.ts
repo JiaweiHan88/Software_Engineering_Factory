@@ -95,7 +95,7 @@ export function loadConfig(projectRoot?: string): BmadConfig {
 
   return {
     gheHost: process.env.COPILOT_GHE_HOST || undefined,
-    model: process.env.COPILOT_MODEL || "claude-sonnet-4.5",
+    model: process.env.COPILOT_MODEL || "claude-sonnet-4.6",
     outputDir: resolve(root, process.env.BMAD_OUTPUT_DIR || "_bmad-output"),
     sprintStatusPath: resolve(
       root,

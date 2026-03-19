@@ -468,16 +468,16 @@ story status = "review"
 | `ANTHROPIC_API_KEY` | *(none)* | Enables Anthropic BYOK tier |
 | `OPENAI_API_KEY` | *(none)* | Enables OpenAI BYOK tier |
 | `MODEL_TIER_FAST` | `gpt-4o-mini` | Override fast tier Copilot model |
-| `MODEL_TIER_STANDARD` | `claude-sonnet-4.5` | Override standard tier Copilot model |
-| `MODEL_TIER_POWERFUL` | `claude-sonnet-4.5` | Override powerful tier Copilot model |
+| `MODEL_TIER_STANDARD` | `claude-sonnet-4.6` | Override standard tier Copilot model |
+| `MODEL_TIER_POWERFUL` | `claude-opus-4.6` | Override powerful tier Copilot model |
 
 **Model tier routing:**
 
 | Tier | Phase Mapping | BYOK Anthropic | BYOK OpenAI | Copilot Default |
 |------|--------------|----------------|-------------|-----------------|
 | fast | sprint-status | claude-haiku-3.5 | gpt-4o-mini | gpt-4o-mini |
-| standard | create-story, dev-story, sprint-planning | claude-sonnet-4.5 | gpt-4o | claude-sonnet-4.5 |
-| powerful | code-review, security, architecture | claude-opus-4 | o3 | claude-sonnet-4.5 |
+| standard | create-story, dev-story, sprint-planning | claude-sonnet-4.5 | gpt-4o | claude-sonnet-4.6 |
+| powerful | code-review, security, architecture | claude-opus-4 | o3 | claude-opus-4.6 |
 
 **OTel metrics registered:**
 

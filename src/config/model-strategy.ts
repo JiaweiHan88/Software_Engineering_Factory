@@ -32,7 +32,7 @@ export type ModelProvider = "copilot" | "anthropic" | "openai";
 
 /** A resolved model selection. */
 export interface ModelSelection {
-  /** The selected model identifier (e.g., "claude-sonnet-4.5", "gpt-4o-mini") */
+  /** The selected model identifier (e.g., "claude-sonnet-4.6", "gpt-4o-mini") */
   model: string;
   /** The provider to use */
   provider: ModelProvider;
@@ -78,12 +78,12 @@ const DEFAULT_TIER_MODELS: Record<ModelTier, TierModelConfig> = {
     openai: "gpt-4o-mini",
   },
   standard: {
-    copilot: "claude-sonnet-4.5",
+    copilot: "claude-sonnet-4.6",
     anthropic: "claude-sonnet-4.5",
     openai: "gpt-4o",
   },
   powerful: {
-    copilot: "claude-sonnet-4.5",
+    copilot: "claude-opus-4.6",
     anthropic: "claude-opus-4",
     openai: "o3",
   },

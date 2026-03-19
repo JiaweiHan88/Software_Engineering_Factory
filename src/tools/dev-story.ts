@@ -1,51 +1,104 @@
-import type { BmadToolDefinition } from "./types.js";
-
 /**
  * dev-story tool — BMAD story implementation workflow.
  *
  * Called by the Developer agent to implement a ready-for-dev story.
- * Runs exactly ONCE per story (BMAD rule).
+ * BMAD rule: dev-story runs exactly ONCE per story.
  *
- * TODO (Phase 3): Implement handler with actual code generation.
+ * This tool reads the story markdown, marks it as in-progress,
+ * and instructs the LLM to implement the tasks. The actual code generation
+ * is done by the Copilot session's built-in tools (read_file, write_file, etc.)
+ * — this tool handles the lifecycle bookkeeping.
+ *
+ * @module tools/dev-story
  */
-export const devStoryTool: BmadToolDefinition = {
-  name: "dev_story",
+
+import { readFile } from "node:fs/promises";
+import { z } from "zod";
+import { defineTool } from "./types.js";
+import { loadConfig } from "../config/index.js";
+import { readSprintStatus, writeSprintStatus } from "./sprint-status.js";
+
+/**
+ * Copilot SDK tool: dev_story
+ *
+ * Reads the story file, transitions status to 'in-progress', and returns
+ * the full story content so the LLM agent can implement it using built-in tools.
+ * When implementation is complete, call sprint_status to move to 'review'.
+ */
+export const devStoryTool = defineTool("dev_story", {
   description:
-    "Implement a user story by writing code, tests, and migrations. Reads the story file, implements all tasks, and moves status from 'ready-for-dev' to 'review'. Runs exactly ONCE per story.",
-  parameters: {
-    type: "object",
-    properties: {
-      story_id: {
-        type: "string",
-        description: "The story identifier to implement",
-      },
-      story_file_path: {
-        type: "string",
-        description: "Path to the story markdown file",
-      },
-      model_tier: {
-        type: "string",
-        description:
-          "Model tier to use: 'highest' for complex stories, 'standard' for straightforward ones",
-      },
-    },
-    required: ["story_id", "story_file_path"],
-  },
+    "Begin implementing a BMAD user story. Reads the story file, transitions status to 'in-progress', " +
+    "and returns the story content (acceptance criteria, tasks, developer notes) for the developer agent " +
+    "to implement. BMAD rule: dev_story runs exactly ONCE per story. " +
+    "After completing implementation, use sprint_status tool to move the story to 'review'.",
+  parameters: z.object({
+    story_id: z
+      .string()
+      .describe("The story identifier to implement (e.g., 'STORY-001')"),
+    story_file_path: z
+      .string()
+      .describe("Absolute or relative path to the story markdown file"),
+  }),
   handler: async (args) => {
-    // TODO: Phase 3 — Implement story development
-    // 1. Read story file and extract ACs, tasks, subtasks
-    // 2. Read architecture docs for patterns and conventions
-    // 3. Implement each task in order
-    // 4. Write tests for each implementation
-    // 5. Run tests to verify
-    // 6. Update sprint-status.yaml: ready-for-dev → in-progress → review
-    console.log(`[dev_story] Implementing story: ${args.story_id}`);
+    const config = loadConfig();
+
+    // 1. Verify story is in the right status
+    const sprintData = await readSprintStatus(config.sprintStatusPath);
+    const story = sprintData.sprint.stories.find((s) => s.id === args.story_id);
+
+    if (!story) {
+      return {
+        textResultForLlm: `Error: Story ${args.story_id} not found in sprint-status.yaml. Use sprint_status tool to check available stories.`,
+        resultType: "failure" as const,
+      };
+    }
+
+    if (story.status === "in-progress") {
+      return {
+        textResultForLlm: `Error: Story ${args.story_id} is already in-progress. BMAD rule: dev_story runs exactly ONCE per story. If you need to continue, read the story file directly.`,
+        resultType: "failure" as const,
+      };
+    }
+
+    if (story.status === "review" || story.status === "done") {
+      return {
+        textResultForLlm: `Error: Story ${args.story_id} has status '${story.status}' — it has already been implemented.`,
+        resultType: "failure" as const,
+      };
+    }
+
+    // 2. Read the story file
+    let storyContent: string;
+    try {
+      storyContent = await readFile(args.story_file_path, "utf-8");
+    } catch {
+      return {
+        textResultForLlm: `Error: Could not read story file at '${args.story_file_path}'. Verify the path is correct.`,
+        resultType: "failure" as const,
+      };
+    }
+
+    // 3. Transition to in-progress
+    story.status = "in-progress";
+    story.assigned = "bmad-developer";
+    await writeSprintStatus(config.sprintStatusPath, sprintData);
+
+    // 4. Return story content for the LLM to implement
     return {
-      status: "implemented",
-      story_id: args.story_id,
-      new_status: "review",
-      files_changed: [],
-      tests_passed: true,
+      textResultForLlm: [
+        `=== DEV-STORY: ${args.story_id} ===`,
+        `Status transitioned: ready-for-dev → in-progress`,
+        `Assigned to: bmad-developer`,
+        ``,
+        `INSTRUCTIONS: Implement ALL tasks and acceptance criteria below.`,
+        `After implementation, use sprint_status tool to update status to 'review'.`,
+        ``,
+        `--- STORY CONTENT ---`,
+        storyContent,
+        `--- END STORY CONTENT ---`,
+      ].join("\n"),
+      resultType: "success" as const,
     };
   },
-};
+});
+

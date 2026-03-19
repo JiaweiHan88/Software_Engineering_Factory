@@ -1,16 +1,12 @@
 /**
- * BMAD Tool Type — matches Copilot SDK defineTool() shape.
- * We define our own interface so we can type-check before the SDK is installed.
+ * BMAD Tool Types — re-exports from Copilot SDK for convenience.
  *
- * When the SDK is installed, these will be passed to defineTool() directly.
+ * Tools are created via the SDK's `defineTool()` helper which provides
+ * Zod schema → JSON Schema conversion and type-safe handlers.
+ *
+ * @module tools/types
  */
-export interface BmadToolDefinition {
-  name: string;
-  description: string;
-  parameters: {
-    type: "object";
-    properties: Record<string, { type: string; description: string }>;
-    required?: string[];
-  };
-  handler: (args: Record<string, unknown>) => Promise<unknown>;
-}
+
+export { defineTool } from "@github/copilot-sdk";
+export type { Tool, ToolHandler, ToolInvocation, ToolResultObject } from "@github/copilot-sdk";
+

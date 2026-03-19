@@ -1,58 +1,196 @@
-import type { BmadToolDefinition } from "./types.js";
-
 /**
  * code-review tool — BMAD adversarial code review workflow.
  *
- * Called by the Code Reviewer agent. Runs up to 3 passes.
- * HIGH/CRITICAL issues are fixed in-place, then re-reviewed.
+ * Called by the Code Reviewer agent. Performs lifecycle bookkeeping:
+ * - Verifies story is in 'review' status
+ * - Tracks review pass count (max 3)
+ * - Returns story + file list for the LLM to review
+ * - On pass: moves story to 'done'
+ * - On fail after 3 passes: escalates to human
  *
- * TODO (Phase 3): Implement handler with actual review logic.
+ * The actual code analysis is done by the LLM using built-in tools.
+ * This tool manages the review lifecycle.
+ *
+ * @module tools/code-review
  */
-export const codeReviewTool: BmadToolDefinition = {
-  name: "code_review",
+
+import { readFile } from "node:fs/promises";
+import { z } from "zod";
+import { defineTool } from "./types.js";
+import { loadConfig } from "../config/index.js";
+import { readSprintStatus, writeSprintStatus } from "./sprint-status.js";
+
+/**
+ * Copilot SDK tool: code_review
+ *
+ * Initiates a review pass. The agent should then:
+ * 1. Read and analyze the files listed
+ * 2. Rate issues by severity (LOW/MEDIUM/HIGH/CRITICAL)
+ * 3. Call code_review_result to record the outcome
+ */
+export const codeReviewTool = defineTool("code_review", {
   description:
-    "Perform adversarial code review on implemented story. Rate issues by severity (LOW/MEDIUM/HIGH/CRITICAL). Fix HIGH/CRITICAL in-place. Max 3 review passes.",
-  parameters: {
-    type: "object",
-    properties: {
-      story_id: {
-        type: "string",
-        description: "The story identifier to review",
-      },
-      review_pass: {
-        type: "string",
-        description: "Current review pass number (1, 2, or 3)",
-      },
-      files_to_review: {
-        type: "string",
-        description:
-          "Comma-separated list of file paths changed by dev-story",
-      },
-    },
-    required: ["story_id", "review_pass"],
-  },
+    "Initiate a code review pass for a BMAD story. Returns the story content and file list " +
+    "for the Code Reviewer agent to analyze. After reviewing, use code_review_result to record " +
+    "the outcome. Max 3 review passes — escalates to human after that.",
+  parameters: z.object({
+    story_id: z
+      .string()
+      .describe("The story identifier to review (e.g., 'STORY-001')"),
+    story_file_path: z
+      .string()
+      .describe("Path to the story markdown file"),
+    files_to_review: z
+      .string()
+      .describe("Comma-separated list of file paths changed by dev_story"),
+  }),
   handler: async (args) => {
-    // TODO: Phase 3 — Implement code review
-    // 1. Read story file for ACs
-    // 2. Read all changed files
-    // 3. Review each file against ACs and quality standards
-    // 4. Rate issues: LOW / MEDIUM / HIGH / CRITICAL
-    // 5. If HIGH/CRITICAL: fix in-place, return needs_re_review=true
-    // 6. If clean: return approved=true, advance story to "done"
-    // 7. If pass 3: advance regardless
-    const pass = Number(args.review_pass) || 1;
-    console.log(
-      `[code_review] Reviewing story ${args.story_id} (pass ${pass}/3)`
-    );
+    const config = loadConfig();
+    const sprintData = await readSprintStatus(config.sprintStatusPath);
+    const story = sprintData.sprint.stories.find((s) => s.id === args.story_id);
+
+    if (!story) {
+      return {
+        textResultForLlm: `Error: Story ${args.story_id} not found in sprint-status.yaml.`,
+        resultType: "failure" as const,
+      };
+    }
+
+    if (story.status !== "review") {
+      return {
+        textResultForLlm: `Error: Story ${args.story_id} has status '${story.status}'. Expected 'review'.`,
+        resultType: "failure" as const,
+      };
+    }
+
+    const currentPass = (story.reviewPasses ?? 0) + 1;
+    if (currentPass > config.reviewPassLimit) {
+      return {
+        textResultForLlm: [
+          `⚠️ ESCALATION: Story ${args.story_id} has exceeded ${config.reviewPassLimit} review passes.`,
+          `This story requires human intervention. Please review manually.`,
+          `Review history: ${story.reviewPasses} passes completed.`,
+        ].join("\n"),
+        resultType: "failure" as const,
+      };
+    }
+
+    // Read story file
+    let storyContent: string;
+    try {
+      storyContent = await readFile(args.story_file_path, "utf-8");
+    } catch {
+      return {
+        textResultForLlm: `Error: Could not read story file at '${args.story_file_path}'.`,
+        resultType: "failure" as const,
+      };
+    }
+
+    // Update review pass counter
+    story.reviewPasses = currentPass;
+    story.assigned = "bmad-code-reviewer";
+    await writeSprintStatus(config.sprintStatusPath, sprintData);
+
+    const fileList = args.files_to_review.split(",").map((f) => f.trim()).filter(Boolean);
+
     return {
-      status: "reviewed",
-      story_id: args.story_id,
-      review_pass: pass,
-      issues_found: [],
-      high_critical_count: 0,
-      approved: true,
-      needs_re_review: false,
-      new_status: "done",
+      textResultForLlm: [
+        `=== CODE REVIEW: ${args.story_id} (Pass ${currentPass}/${config.reviewPassLimit}) ===`,
+        ``,
+        `REVIEW PROTOCOL:`,
+        `1. Read each file listed below`,
+        `2. Check against story acceptance criteria`,
+        `3. Rate each finding: LOW / MEDIUM / HIGH / CRITICAL`,
+        `4. If HIGH/CRITICAL found → fix in-place, then call code_review_result with approved=false`,
+        `5. If all clean → call code_review_result with approved=true`,
+        ``,
+        `FILES TO REVIEW (${fileList.length}):`,
+        ...fileList.map((f) => `  • ${f}`),
+        ``,
+        `--- STORY CONTENT ---`,
+        storyContent,
+        `--- END STORY CONTENT ---`,
+      ].join("\n"),
+      resultType: "success" as const,
     };
   },
-};
+});
+
+/**
+ * Copilot SDK tool: code_review_result
+ *
+ * Records the outcome of a code review pass and transitions the story accordingly.
+ */
+export const codeReviewResultTool = defineTool("code_review_result", {
+  description:
+    "Record the result of a code review pass. If approved, moves story to 'done'. " +
+    "If rejected with HIGH/CRITICAL findings, keeps in 'review' for the next pass. " +
+    "If max passes exceeded, escalates to human.",
+  parameters: z.object({
+    story_id: z
+      .string()
+      .describe("The story identifier that was reviewed"),
+    approved: z
+      .boolean()
+      .describe("Whether the code review passed (true) or found blocking issues (false)"),
+    findings_summary: z
+      .string()
+      .describe("Summary of review findings and severity ratings"),
+    high_critical_count: z
+      .number()
+      .default(0)
+      .describe("Number of HIGH or CRITICAL severity findings"),
+  }),
+  handler: async (args) => {
+    const config = loadConfig();
+    const sprintData = await readSprintStatus(config.sprintStatusPath);
+    const story = sprintData.sprint.stories.find((s) => s.id === args.story_id);
+
+    if (!story) {
+      return {
+        textResultForLlm: `Error: Story ${args.story_id} not found.`,
+        resultType: "failure" as const,
+      };
+    }
+
+    if (args.approved) {
+      story.status = "done";
+      story.assigned = undefined;
+      await writeSprintStatus(config.sprintStatusPath, sprintData);
+      return {
+        textResultForLlm: [
+          `✅ Story ${args.story_id} APPROVED on pass ${story.reviewPasses}/${config.reviewPassLimit}.`,
+          `Status: review → done`,
+          `Findings: ${args.findings_summary}`,
+        ].join("\n"),
+        resultType: "success" as const,
+      };
+    }
+
+    // Not approved
+    const passesUsed = story.reviewPasses ?? 0;
+    if (passesUsed >= config.reviewPassLimit) {
+      return {
+        textResultForLlm: [
+          `⚠️ ESCALATION: Story ${args.story_id} REJECTED after ${passesUsed} passes.`,
+          `HIGH/CRITICAL findings: ${args.high_critical_count}`,
+          `Summary: ${args.findings_summary}`,
+          `Action required: Human review needed.`,
+        ].join("\n"),
+        resultType: "failure" as const,
+      };
+    }
+
+    await writeSprintStatus(config.sprintStatusPath, sprintData);
+    return {
+      textResultForLlm: [
+        `❌ Story ${args.story_id} REJECTED on pass ${passesUsed}/${config.reviewPassLimit}.`,
+        `HIGH/CRITICAL findings: ${args.high_critical_count}`,
+        `Summary: ${args.findings_summary}`,
+        `Next step: Fix the issues, then run code_review again for pass ${passesUsed + 1}.`,
+      ].join("\n"),
+      resultType: "success" as const,
+    };
+  },
+});
+

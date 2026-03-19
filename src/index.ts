@@ -217,11 +217,11 @@ async function main(): Promise<void> {
   // Initialize the orchestration stack
   const sessionManager = new SessionManager(config);
   const dispatcher = new AgentDispatcher(sessionManager, config);
-  const runner = new SprintRunner(dispatcher, config);
   const stallDetector = new StallDetector({
     checkIntervalMs: config.observability.stallCheckIntervalMs,
     autoEscalate: config.observability.stallAutoEscalate,
   });
+  const runner = new SprintRunner(dispatcher, config, stallDetector);
 
   stallDetector.onStallDetected((event) => {
     log.warn("Stall detected", {

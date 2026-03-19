@@ -27,53 +27,36 @@
 
 | Item | Status |
 |------|--------|
-| Workspace | `/Users/Q543651/repos/AI Repo/BMAD_Copilot_RT` — 2 markdown files, no git repo |
-| Node.js | ❌ **Not installed** |
-| npm / pnpm | ❌ **Not installed** |
-| Homebrew | ❌ **Not installed** |
-| GitHub CLI (`gh`) | ❌ **Not installed** |
-| Copilot CLI (`copilot`) | ❌ **Not installed** |
+| Workspace | `/Users/Q543651/repos/AI Repo/BMAD_Copilot_RT` — git repo, 10 commits, ~1313 tracked files |
+| Node.js | ✅ 25.8.1 |
+| pnpm | ✅ 10.32.1 |
+| Homebrew | ✅ 5.1.0 |
+| GitHub CLI (`gh`) | ✅ Installed (`/opt/homebrew/bin/gh`) |
+| Copilot CLI (`copilot`) | ❌ **Not installed** — needed for live agent sessions |
 | Git | ✅ 2.50.1 |
-| Docker | ✅ Available |
+| Docker | ✅ 29.2.1 |
 | Python | ⚠️ 3.9.6 (system) |
+| TypeScript | ✅ 5.7+ (strict mode, ESM) |
+| Test Suite | ✅ 67 tests passing (vitest 3.2.4) |
+| OpenTelemetry | ✅ Wired (traces + metrics, OTLP export) |
 
 ---
 
-## 🔴 Things I Need From You (Blockers)
-
-These are ordered. Each phase has a "gate" — work below it is blocked until you complete the action.
-
-### GATE 0 — Foundation Tools (blocks everything)
+## 🔴 Remaining Blockers
 
 | # | Action | How | Why |
 |---|--------|-----|-----|
-| **Y1** | **Install Homebrew** | `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"` | Package manager for everything else |
-| **Y2** | **Install Node.js 20+** | `brew install node@22` | Copilot SDK, Paperclip, and Clipper all require Node.js 20+ |
-| **Y3** | **Install pnpm** | `npm install -g pnpm` | Paperclip uses pnpm workspaces |
-| **Y4** | **Install GitHub CLI** | `brew install gh` then `gh auth login` | Needed for Copilot CLI, GitHub MCP, repo management |
-| **Y5** | **Install Copilot CLI** | `gh extension install github/gh-copilot` then follow setup, or see [install docs](https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli) | The agent runtime that the SDK wraps |
-
-> **After you complete Y1-Y5**, tell me and I'll verify everything works and continue.
-
-### GATE 1 — Accounts & Credentials (blocks Phase 2+)
-
-| # | Action | How | Why |
-|---|--------|-----|-----|
-| **Y6** | **Confirm GitHub Copilot subscription tier** | Check at github.com/settings/copilot — need at least **Pro** ($10/mo) for Copilot CLI + agent features | SDK + CLI require an active subscription |
-| **Y7** | **Create a GitHub repo** for this project | `gh repo create BMAD_Copilot_RT --public --source .` (or private, your choice) | Central source control, needed for GitHub MCP server integration |
-| **Y8** | **(Optional) Provide BYOK API keys** | If you want to use your own Anthropic/OpenAI keys instead of Copilot quota: export `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` | Cost control — avoids using Copilot premium request quota |
-
-### GATE 2 — Paperclip Setup (blocks Phase 4+)
-
-| # | Action | How | Why |
-|---|--------|-----|-----|
-| **Y9** | **Verify Paperclip runs** | After I scaffold the Docker Compose setup, run `docker compose up` and confirm the UI loads at `http://localhost:3100` | Paperclip needs PostgreSQL, which runs in Docker |
+| **Y5** | **Install Copilot CLI** | `gh extension install github/gh-copilot` | Required for live agent sessions (end-to-end test) |
+| **Y8** | **(Optional) Provide BYOK API keys** | Export `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` | Cost control — avoids using Copilot premium request quota |
+| **Y9** | **Verify Paperclip runs** | `docker compose --profile factory up` | Paperclip integration (Phase 4 runtime) |
 
 ---
 
-## 🟢 Things I Can Do Autonomously
+## 🟢 Completed Gates
 
-Once the gates are cleared, I can build all of this without interrupting you.
+- **GATE 0** — Foundation Tools: ✅ Homebrew, Node.js 25, pnpm 10, GitHub CLI all installed
+- **GATE 1** — Accounts & Credentials: ✅ GitHub repo created and pushed
+- **GATE 2** — Paperclip Setup: ⏳ Docker Compose scaffolded, not yet runtime-tested
 
 ---
 

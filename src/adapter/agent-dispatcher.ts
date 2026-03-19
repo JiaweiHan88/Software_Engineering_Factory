@@ -28,6 +28,8 @@ import type { SessionManager } from "./session-manager.js";
 import { Logger } from "../observability/logger.js";
 import { traceAgentDispatch } from "../observability/tracing.js";
 import { recordDispatchDuration } from "../observability/metrics.js";
+import { resolveModel, loadModelStrategyConfig } from "../config/model-strategy.js";
+import type { ModelStrategyConfig, ComplexitySignals } from "../config/model-strategy.js";
 
 const log = Logger.child("agent-dispatcher");
 
@@ -59,6 +61,8 @@ export interface WorkItem {
   epicId?: string;
   /** Additional context to inject into the prompt */
   extraContext?: string;
+  /** Complexity signals for model tier selection */
+  complexitySignals?: ComplexitySignals;
 }
 
 /**
@@ -179,10 +183,12 @@ export class AgentDispatcher {
   private sessionManager: SessionManager;
   private config: BmadConfig;
   private skillDirs: string[];
+  private modelStrategy: ModelStrategyConfig;
 
   constructor(sessionManager: SessionManager, config: BmadConfig) {
     this.sessionManager = sessionManager;
     this.config = config;
+    this.modelStrategy = loadModelStrategyConfig();
 
     // Resolve skill directories — both our custom skills and BMAD's .github/skills
     this.skillDirs = [
@@ -233,6 +239,15 @@ export class AgentDispatcher {
       storyId: item.storyId ?? "n/a",
     });
 
+    // Resolve optimal model based on task complexity
+    const modelSelection = resolveModel(item.phase, item.complexitySignals ?? {}, this.modelStrategy);
+    log.info("Model selected", {
+      model: modelSelection.model,
+      tier: modelSelection.tier,
+      provider: modelSelection.provider,
+      reason: modelSelection.complexityReason,
+    });
+
     const startTime = Date.now();
 
     try {
@@ -247,6 +262,7 @@ export class AgentDispatcher {
             allAgents,
             tools: phaseConfig.tools,
             skillDirectories: this.skillDirs,
+            model: modelSelection.model,
           });
 
           // Track story association
@@ -267,6 +283,9 @@ export class AgentDispatcher {
 
           span.setAttribute("dispatch.success", true);
           span.setAttribute("response.length", response.length);
+          span.setAttribute("model.name", modelSelection.model);
+          span.setAttribute("model.tier", modelSelection.tier);
+          span.setAttribute("model.provider", modelSelection.provider);
 
           return {
             success: true,

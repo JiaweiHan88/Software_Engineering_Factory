@@ -26,6 +26,7 @@ import type { ReviewOrchestratorEvent } from "../quality-gates/review-orchestrat
 import { Logger } from "../observability/logger.js";
 import { traceSprintCycle, traceStoryProcessing } from "../observability/tracing.js";
 import { recordStoryProcessed, recordStoryDone, recordSprintCycle } from "../observability/metrics.js";
+import type { StallDetector, StallablePhase } from "../observability/stall-detector.js";
 
 const log = Logger.child("sprint-runner");
 
@@ -70,11 +71,13 @@ export class SprintRunner {
   private dispatcher: AgentDispatcher;
   private config: BmadConfig;
   private reviewOrchestrator: ReviewOrchestrator;
+  private stallDetector: StallDetector | null;
 
-  constructor(dispatcher: AgentDispatcher, config: BmadConfig) {
+  constructor(dispatcher: AgentDispatcher, config: BmadConfig, stallDetector?: StallDetector) {
     this.dispatcher = dispatcher;
     this.config = config;
     this.reviewOrchestrator = new ReviewOrchestrator(dispatcher, config);
+    this.stallDetector = stallDetector ?? null;
   }
 
   /**
@@ -195,6 +198,11 @@ export class SprintRunner {
 
     onEvent?.({ type: "story-start", storyId: story.id, phase });
 
+    // Track phase entry for stall detection
+    if (this.stallDetector && isStallablePhase(story.status)) {
+      this.stallDetector.trackPhaseEntry(story.id, story.status as StallablePhase);
+    }
+
     if (!live) {
       log.info("Dry run — skipping dispatch", { storyId: story.id, phase });
       onEvent?.({
@@ -235,6 +243,11 @@ export class SprintRunner {
         });
       }
 
+      // Clear stall tracking when story passes review
+      if (orchestrationResult.approved) {
+        this.stallDetector?.clearStory(story.id);
+      }
+
       return orchestrationResult.approved;
     }
 
@@ -259,7 +272,14 @@ export class SprintRunner {
     // Check if the story is now done (re-read status after agent made changes)
     const updated = await readSprintStatus(this.config.sprintStatusPath);
     const updatedStory = updated.sprint.stories.find((s) => s.id === story.id);
-    return updatedStory?.status === "done";
+    const isDone = updatedStory?.status === "done";
+
+    // Clear stall tracking when story completes
+    if (isDone) {
+      this.stallDetector?.clearStory(story.id);
+    }
+
+    return isDone;
   }
 
   /**
@@ -314,4 +334,18 @@ export class SprintRunner {
 
     return lines.join("\n");
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Phases that the stall detector can monitor. */
+const STALLABLE_PHASES = new Set<string>(["ready-for-dev", "in-progress", "review"]);
+
+/**
+ * Type guard: is this story status a stallable phase?
+ */
+function isStallablePhase(status: string): status is StallablePhase {
+  return STALLABLE_PHASES.has(status);
 }

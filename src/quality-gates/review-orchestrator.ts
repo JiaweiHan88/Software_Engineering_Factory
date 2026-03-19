@@ -29,6 +29,11 @@ import { evaluateGate, decideNextAction, formatGateReport, formatReviewTimeline 
 import type { BmadConfig } from "../config/config.js";
 import type { AgentDispatcher, DispatchResult } from "../adapter/agent-dispatcher.js";
 import { readSprintStatus, writeSprintStatus } from "../tools/sprint-status.js";
+import { Logger } from "../observability/logger.js";
+import { traceQualityGate } from "../observability/tracing.js";
+import { recordReviewPass, recordGateVerdict } from "../observability/metrics.js";
+
+const log = Logger.child("review-orchestrator");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Review History Persistence
@@ -241,6 +246,7 @@ export class ReviewOrchestrator {
 
     // If already terminal, return immediately
     if (history.status === "approved" || history.status === "escalated") {
+      log.info("Story already terminal", { storyId, status: history.status });
       return {
         approved: history.status === "approved",
         escalated: history.status === "escalated",
@@ -259,8 +265,15 @@ export class ReviewOrchestrator {
 
       // ── Step 1: Dispatch code review ──
       onEvent?.({ type: "review-start", storyId, passNumber: pass });
+      log.info("Review pass starting", { storyId, pass, maxPasses });
+      recordReviewPass(storyId, pass);
 
-      const reviewResult = await this.dispatchReview(storyId, storyTitle, pass, onDelta);
+      const reviewResult = await traceQualityGate(storyId, pass, async (span) => {
+        const result = await this.dispatchReview(storyId, storyTitle, pass, onDelta);
+        span.setAttribute("review.success", result.success);
+        span.setAttribute("review.agent", result.agentName);
+        return result;
+      });
       onEvent?.({
         type: "review-dispatched",
         storyId,
@@ -270,6 +283,7 @@ export class ReviewOrchestrator {
 
       if (!reviewResult.success) {
         onEvent?.({ type: "review-error", storyId, error: reviewResult.error ?? "Review dispatch failed" });
+        log.error("Review dispatch failed", { storyId, pass, error: reviewResult.error });
         // Record the failed pass and continue (or break)
         break;
       }
@@ -289,7 +303,16 @@ export class ReviewOrchestrator {
       onEvent?.({ type: "gate-evaluated", storyId, result: gateResult });
 
       // Log the gate report
-      console.log(formatGateReport(gateResult));
+      log.info("Gate evaluated", {
+        storyId,
+        pass,
+        verdict: gateResult.verdict,
+        blocking: gateResult.blockingCount,
+        advisory: gateResult.advisoryCount,
+        score: gateResult.severityScore,
+      });
+      log.debug("Gate report detail", { report: formatGateReport(gateResult) });
+      recordGateVerdict(storyId, gateResult.verdict, gateResult.severityScore);
 
       // ── Step 4: Decide next action ──
       const action = decideNextAction(gateResult, history);
@@ -314,6 +337,7 @@ export class ReviewOrchestrator {
         await this.transitionStory(storyId, "done");
 
         onEvent?.({ type: "review-approved", storyId, totalPasses: pass });
+        log.info("Story approved", { storyId, totalPasses: pass });
 
         return {
           approved: true,
@@ -327,6 +351,7 @@ export class ReviewOrchestrator {
 
       if (action.type === "fix-and-retry") {
         // ── FAIL — fix blocking findings and retry ──
+        log.info("Fix-and-retry", { storyId, pass, findingCount: action.findings.length });
         onEvent?.({
           type: "fix-start",
           storyId,
@@ -358,6 +383,7 @@ export class ReviewOrchestrator {
 
       if (action.type === "escalate") {
         // ── ESCALATE — exceeded max passes ──
+        log.warn("Escalating story", { storyId, pass, reason: action.reason });
         history.passes.push(passRecord);
         history.status = "escalated";
         history.finalVerdict = "ESCALATE";

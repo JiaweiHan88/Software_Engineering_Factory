@@ -25,7 +25,11 @@ export interface PaperclipAgent {
   name: string;
   title: string;
   companyId: string;
-  status: "active" | "paused" | "terminated";
+  /** Agent role in the org (e.g., "engineer", "pm", "manager") */
+  role?: string;
+  /** Human-readable description of agent capabilities */
+  capabilities?: string;
+  status: "active" | "paused" | "terminated" | "idle";
   reportsTo?: string;
   adapterType?: string;
   heartbeatEnabled: boolean;
@@ -42,11 +46,15 @@ export interface PaperclipIssue {
   title: string;
   description: string;
   status: string;
-  assigneeId?: string;
+  /** Paperclip field: assigneeAgentId (UUID of agent assigned to this issue) */
+  assigneeAgentId?: string;
   projectId?: string;
   goalId?: string;
-  parentIssueId?: string;
+  /** Paperclip field: parentId (UUID of parent issue for sub-issues) */
+  parentId?: string;
   companyId?: string;
+  /** Paperclip field: priority (critical | high | medium | low) */
+  priority?: string;
   labels?: string[];
   /** BMAD-specific: story ID mapped from issue metadata */
   storyId?: string;
@@ -412,15 +420,17 @@ export class PaperclipClient {
    */
   async listIssues(filters?: {
     status?: string;
-    assigneeId?: string;
+    assigneeAgentId?: string;
     projectId?: string;
     goalId?: string;
+    parentId?: string;
   }): Promise<PaperclipIssue[]> {
     const params = new URLSearchParams();
     if (filters?.status) params.set("status", filters.status);
-    if (filters?.assigneeId) params.set("assigneeAgentId", filters.assigneeId);
+    if (filters?.assigneeAgentId) params.set("assigneeAgentId", filters.assigneeAgentId);
     if (filters?.projectId) params.set("project_id", filters.projectId);
     if (filters?.goalId) params.set("goal_id", filters.goalId);
+    if (filters?.parentId) params.set("parentId", filters.parentId);
     const qs = params.toString();
     return this.request<PaperclipIssue[]>(
       "GET",
@@ -454,7 +464,7 @@ export class PaperclipClient {
    */
   async updateIssue(
     issueId: string,
-    updates: Partial<Pick<PaperclipIssue, "title" | "description" | "status" | "assigneeId" | "labels" | "metadata">>,
+    updates: Partial<Pick<PaperclipIssue, "title" | "description" | "status" | "assigneeAgentId" | "priority" | "labels" | "metadata">>,
   ): Promise<PaperclipIssue> {
     return this.request<PaperclipIssue>(
       "PATCH",

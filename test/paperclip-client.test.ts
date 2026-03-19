@@ -255,7 +255,7 @@ describe("PaperclipClient", () => {
     it("lists issues with filters", async () => {
       mockFetch.mockResolvedValueOnce(jsonResponse([]));
 
-      await client.listIssues({ status: "open", assigneeId: "a1" });
+      await client.listIssues({ status: "open", assigneeAgentId: "a1" });
 
       const url = mockFetch.mock.calls[0][0] as string;
       expect(url).toContain("status=open");

@@ -40,10 +40,11 @@ import { PaperclipReporter } from "./adapter/reporter.js";
 import { SessionManager } from "./adapter/session-manager.js";
 import { AgentDispatcher } from "./adapter/agent-dispatcher.js";
 import { handlePaperclipIssue } from "./adapter/heartbeat-handler.js";
+import { orchestrateCeoIssue } from "./adapter/ceo-orchestrator.js";
 import { resolveRoleMapping, PAPERCLIP_SKILLS } from "./config/role-mapping.js";
 import type { RoleMappingEntry } from "./config/role-mapping.js";
 import { loadConfig } from "./config/config.js";
-import { getAgent, allAgents } from "./agents/registry.js";
+import { allAgents } from "./agents/registry.js";
 import { allTools } from "./tools/index.js";
 import { Logger } from "./observability/logger.js";
 
@@ -391,7 +392,7 @@ async function main(): Promise<void> {
     if (env.agentApiKey) {
       inbox = await paperclipClient.getAgentInbox();
     } else {
-      inbox = await paperclipClient.listIssues({ assigneeId: env.agentId });
+      inbox = await paperclipClient.listIssues({ assigneeAgentId: env.agentId });
     }
     log.info("Inbox checked", { issueCount: inbox.length });
   } catch (err) {
@@ -452,8 +453,22 @@ async function main(): Promise<void> {
 
     try {
       if (mapping.isOrchestrator) {
-        // CEO orchestrator: delegate the issue to appropriate sub-agent
-        await handleOrchestratorIssue(issue, agentSelf, paperclipClient, reporter, dispatcher);
+        // CEO orchestrator: use Copilot SDK session to analyze issue,
+        // produce a structured delegation plan, and create sub-issues
+        const result = await orchestrateCeoIssue(
+          issue,
+          agentSelf,
+          paperclipClient,
+          reporter,
+          sessionManager,
+          config,
+          mapping,
+        );
+        log.info("CEO orchestration result", {
+          issueId: issue.id,
+          success: result.success,
+          subtasksCreated: result.subtasksCreated,
+        });
       } else {
         // Domain agent: process the issue directly
         await handlePaperclipIssue(issue, env.agentId, bmadRole, dispatcher, reporter);
@@ -482,109 +497,6 @@ async function main(): Promise<void> {
     outcome: "completed",
     issuesProcessed: inbox.length,
   });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Orchestrator (CEO) Issue Handling
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Handle an issue as the CEO orchestrator.
- *
- * The CEO doesn't do domain work itself — it analyzes the issue,
- * determines which BMAD agent should handle it, and delegates by
- * either creating a sub-issue or reassigning.
- *
- * For now, the CEO uses a simple heuristic to delegate. In future,
- * this will be a full Copilot SDK session where the CEO agent reasons
- * about the issue and decides the delegation plan.
- *
- * @param issue - The issue from the CEO's inbox
- * @param ceoAgent - The CEO's Paperclip agent record
- * @param client - Paperclip API client
- * @param reporter - Reporter for issue comments
- * @param dispatcher - Agent dispatcher (for fallback direct dispatch)
- */
-async function handleOrchestratorIssue(
-  issue: PaperclipIssue,
-  ceoAgent: PaperclipAgent,
-  client: PaperclipClient,
-  reporter: PaperclipReporter,
-  dispatcher: AgentDispatcher,
-): Promise<void> {
-  log.info("CEO orchestrator processing issue", {
-    issueId: issue.id,
-    title: issue.title,
-  });
-
-  // Determine the appropriate agent based on issue labels/phase/content
-  const targetRole = inferTargetRole(issue);
-
-  if (targetRole) {
-    // Post delegation comment on the issue
-    await client.addIssueComment(
-      issue.id,
-      `🎯 **CEO** — Delegating to **${targetRole}** for processing.`,
-    );
-
-    // Reassign the issue to the target agent (by updating assignee)
-    // In a full implementation, CEO would create sub-issues or use
-    // the Copilot SDK to reason about the delegation.
-    log.info("CEO delegating issue", { targetRole, issueId: issue.id });
-
-    // For now, dispatch directly through our existing dispatcher
-    const result = await dispatcher.dispatchDirect(
-      targetRole,
-      `Process this issue:\n\nTitle: ${issue.title}\nDescription: ${issue.description}\n\nStory ID: ${issue.storyId ?? "N/A"}`,
-    );
-
-    await reporter.reportDispatchResult(ceoAgent.id, issue.id, result);
-  } else {
-    // Can't determine target — report back for human review
-    await client.addIssueComment(
-      issue.id,
-      `⚠️ **CEO** — Unable to determine which agent should handle this issue. Requesting human guidance.`,
-    );
-
-    log.warn("CEO couldn't determine target role for issue", {
-      issueId: issue.id,
-      title: issue.title,
-    });
-  }
-}
-
-/**
- * Infer which BMAD agent should handle an issue based on its content.
- *
- * Simple heuristic for Phase 1. Future versions will use a full
- * Copilot SDK session where the CEO reasons about delegation.
- *
- * @param issue - The Paperclip issue to analyze
- * @returns BMAD agent name, or null if uncertain
- */
-function inferTargetRole(issue: PaperclipIssue): string | null {
-  const text = `${issue.title} ${issue.description}`.toLowerCase();
-  const phase = issue.phase?.toLowerCase();
-  const labels = (issue.labels ?? []).map((l) => l.toLowerCase());
-
-  // Explicit phase label
-  if (phase === "create-story" || labels.includes("story-creation")) return "bmad-pm";
-  if (phase === "dev-story" || labels.includes("development")) return "bmad-dev";
-  if (phase === "code-review" || labels.includes("review")) return "bmad-qa";
-  if (phase === "sprint-planning" || labels.includes("planning")) return "bmad-sm";
-  if (phase === "sprint-status" || labels.includes("status")) return "bmad-sm";
-
-  // Content heuristic
-  if (text.includes("prd") || text.includes("product requirement")) return "bmad-pm";
-  if (text.includes("architecture") || text.includes("tech design")) return "bmad-architect";
-  if (text.includes("implement") || text.includes("develop") || text.includes("code")) return "bmad-dev";
-  if (text.includes("test") || text.includes("review") || text.includes("qa")) return "bmad-qa";
-  if (text.includes("sprint") || text.includes("planning")) return "bmad-sm";
-  if (text.includes("ux") || text.includes("design") || text.includes("wireframe")) return "bmad-ux-designer";
-  if (text.includes("document") || text.includes("doc")) return "bmad-tech-writer";
-  if (text.includes("research") || text.includes("analysis")) return "bmad-analyst";
-
-  return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

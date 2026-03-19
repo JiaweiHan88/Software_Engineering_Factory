@@ -105,24 +105,24 @@ function logQualityGateEvent(storyId: string, event: ReviewOrchestratorEvent): v
 function logPaperclipEvent(event: PaperclipLoopEvent): void {
   switch (event.type) {
     case "loop-start":
-      console.log(`\n🔄 Paperclip loop started — ${event.agentCount} agents registered`);
+      console.log(`\n🔄 Paperclip loop started — ${event.agentCount} agents, mode: ${event.mode}`);
       break;
-    case "agents-registered":
-      console.log(`📋 ${event.count} agents registered with Paperclip`);
+    case "agents-created":
+      console.log(`📋 ${event.count} agents created in Paperclip`);
       break;
-    case "poll":
-      if (event.heartbeatCount > 0) {
-        console.log(`💓 Polled ${event.heartbeatCount} heartbeat(s)`);
+    case "inbox-check":
+      if (event.issueCount > 0) {
+        console.log(`� Found ${event.issueCount} issue(s) in inbox`);
       }
       break;
-    case "heartbeat-processed":
+    case "issue-processed":
       console.log(`✅ ${event.agentId}: ${event.result.status} — ${event.result.message}`);
       break;
-    case "heartbeat-error":
-      console.log(`❌ ${event.agentId}: ${event.error}`);
+    case "issue-error":
+      console.log(`❌ ${event.agentId} (${event.issueId}): ${event.error}`);
       break;
-    case "poll-error":
-      console.log(`⚠️  Poll error: ${event.error}`);
+    case "inbox-error":
+      console.log(`⚠️  Inbox check error: ${event.error}`);
       break;
     case "loop-stop":
       console.log(`🛑 Loop stopped: ${event.reason}`);
@@ -205,11 +205,12 @@ async function main(): Promise<void> {
 
   console.log("🏭 BMAD Copilot Factory\n");
   console.log(`📁 Project root: ${config.projectRoot}`);
+  console.log(`🎯 Target workspace: ${config.targetProjectRoot}`);
   console.log(`📄 Sprint status: ${config.sprintStatusPath}`);
   console.log(`🤖 Model: ${config.model}`);
   console.log(`🔄 Review pass limit: ${config.reviewPassLimit}`);
-  console.log(`� Paperclip: ${config.paperclip.enabled ? `enabled (${config.paperclip.url})` : "disabled"}`);
-  console.log(`�📋 Agents: ${allAgents.length}`);
+  console.log(`📡 Paperclip: ${config.paperclip.enabled ? `enabled (${config.paperclip.url}, mode: ${config.paperclip.mode})` : "disabled"}`);
+  console.log(`📋 Agents: ${allAgents.length}`);
   for (const a of allAgents) {
     console.log(`   • ${a.displayName} (${a.name})`);
   }
@@ -260,7 +261,7 @@ async function main(): Promise<void> {
       console.log("\n⚠️  Paperclip integration is disabled. Set PAPERCLIP_ENABLED=true to enable.");
       console.log("   Falling back to standalone sprint mode.\n");
     } else {
-      console.log(`\n📡 Paperclip mode — connecting to ${config.paperclip.url}`);
+      console.log(`\n📡 Paperclip mode (${config.paperclip.mode}) — connecting to ${config.paperclip.url}`);
       const loop = new PaperclipLoop(sessionManager, dispatcher, config);
 
       // Handle graceful shutdown
@@ -314,8 +315,18 @@ async function main(): Promise<void> {
   } finally {
     stallDetector.stopContinuousCheck();
     await sessionManager.stop();
-    await shutdownTracing();
-    await shutdownMetrics();
+    try {
+      await shutdownTracing();
+    } catch (err) {
+      // OTel exporter flush errors on shutdown are non-fatal
+      console.warn("⚠️  Tracing shutdown error (non-fatal):", String(err));
+    }
+    try {
+      await shutdownMetrics();
+    } catch (err) {
+      // OTel exporter flush errors on shutdown are non-fatal
+      console.warn("⚠️  Metrics shutdown error (non-fatal):", String(err));
+    }
     console.log("🧹 Shutdown complete.");
   }
 }

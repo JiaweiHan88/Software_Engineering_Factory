@@ -1,33 +1,57 @@
 # Paperclip + PostgreSQL + BMAD Factory
 # Usage:
-#   docker compose up -d                  — Start Paperclip + Postgres
-#   docker compose up -d bmad-factory     — Start BMAD factory alongside Paperclip
-#   docker compose logs -f paperclip      — Stream Paperclip logs
-#   docker compose logs -f bmad-factory   — Stream BMAD factory logs
+#   1. Clone Paperclip:  git clone https://github.com/paperclipai/paperclip.git ../paperclip
+#   2. Start stack:       docker compose up -d
+#   3. Start factory:     docker compose --profile factory up -d
+#   4. Stream logs:       docker compose logs -f paperclip
+#
+# Alternative: npx paperclipai onboard --yes (no Docker needed, uses PGlite)
+#
+# Paperclip UI:  http://localhost:3100
+# Paperclip API: http://localhost:3100/api  (no version prefix)
+#
+# Prerequisites:
+#   - Paperclip source cloned at ../paperclip (relative to this repo)
+#   - BETTER_AUTH_SECRET must be set (e.g. export BETTER_AUTH_SECRET=$(openssl rand -hex 32))
 
 services:
   # ── Paperclip Orchestrator ───────────────────────────────────────────────
+  # Built from source: https://github.com/paperclipai/paperclip
   paperclip:
-    image: ghcr.io/paperclipai/paperclip:latest
+    build:
+      context: ../paperclip
+      dockerfile: Dockerfile
     ports:
       - "3100:3100"
     environment:
-      - DATABASE_URL=postgresql://paperclip:paperclip@postgres:5432/paperclip
-      - NODE_ENV=production
+      DATABASE_URL: postgresql://paperclip:paperclip@postgres:5432/paperclip
+      PORT: "3100"
+      HOST: "0.0.0.0"
+      SERVE_UI: "true"
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated"
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "private"
+      PAPERCLIP_PUBLIC_URL: "${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}"
+      BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET — run: export BETTER_AUTH_SECRET=$(openssl rand -hex 32)}"
+      PAPERCLIP_HOME: "/paperclip"
+      # Pass through LLM keys for Paperclip's own agent support
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+    volumes:
+      - paperclip-data:/paperclip
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3100/api/v1/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3100/api/health"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 15s
+      start_period: 30s
     restart: unless-stopped
 
   # ── PostgreSQL (Paperclip backend) ────────────────────────────────────────
   postgres:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     environment:
       POSTGRES_USER: paperclip
       POSTGRES_PASSWORD: paperclip
@@ -35,7 +59,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U paperclip"]
+      test: ["CMD-SHELL", "pg_isready -U paperclip -d paperclip"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -52,8 +76,9 @@ services:
     environment:
       - PAPERCLIP_ENABLED=true
       - PAPERCLIP_URL=http://paperclip:3100
-      - PAPERCLIP_ORG_ID=bmad-factory
-      - PAPERCLIP_POLL_INTERVAL_MS=5000
+      - PAPERCLIP_COMPANY_ID=bmad-factory
+      - PAPERCLIP_INBOX_CHECK_INTERVAL_MS=15000
+      - PAPERCLIP_MODE=inbox-polling
       - COPILOT_MODEL=${COPILOT_MODEL:-claude-sonnet-4.6}
       - COPILOT_LOG_LEVEL=${COPILOT_LOG_LEVEL:-warning}
       - COPILOT_GHE_HOST=${COPILOT_GHE_HOST:-}
@@ -75,4 +100,5 @@ services:
 
 volumes:
   pgdata:
+  paperclip-data:
 

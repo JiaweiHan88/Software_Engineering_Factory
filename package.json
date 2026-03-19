@@ -9,10 +9,10 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
+    "start": "TARGET_PROJECT_ROOT=../bmad-target-project tsx src/index.ts",
     "start:status": "tsx src/index.ts --status",
     "start:dry-run": "tsx src/index.ts --dry-run",
-    "start:paperclip": "PAPERCLIP_ENABLED=true tsx src/index.ts --paperclip",
+    "start:paperclip": "PAPERCLIP_ENABLED=true TARGET_PROJECT_ROOT=../bmad-target-project tsx src/index.ts --paperclip",
     "test": "vitest run",
     "test:watch": "vitest",
     "sandbox:hello": "tsx src/sandbox/hello-copilot.ts",
@@ -23,7 +23,7 @@
     "observability:up": "docker compose -f docker-compose.observability.yml up -d",
     "observability:down": "docker compose -f docker-compose.observability.yml down",
     "observability:logs": "docker compose -f docker-compose.observability.yml logs -f",
-    "start:otel": "OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 tsx src/index.ts",
+    "start:otel": "OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 TARGET_PROJECT_ROOT=../bmad-target-project tsx src/index.ts",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit"
   },

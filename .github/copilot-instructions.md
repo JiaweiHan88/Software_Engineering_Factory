@@ -3,19 +3,33 @@
 ## Project Overview
 
 This is the **BMAD Copilot Factory** — an autonomous software building system that uses:
-- **Paperclip** for orchestration (org charts, goals, governance, heartbeats)
+- **Paperclip** for orchestration (org charts, goals, governance, company-scoped issues, push-model heartbeats)
 - **GitHub Copilot SDK** for agent runtime (custom agents, tools, MCP, skills)
 - **BMAD Method** for agile methodology (story lifecycle, quality-gated review)
 
 ## Architecture
 
 ```
-Paperclip → Heartbeat Adapter → Copilot SDK → Copilot CLI (headless)
+Paperclip → Issue Assignment (push) → Heartbeat Handler → Copilot SDK → Copilot CLI (headless)
 ```
+
+Paperclip uses a **push model**: it invokes heartbeats on agents, not the other way around.
+BMAD integrates via inbox-polling bridge (dev) or webhook server (prod).
+Results flow back through issue comments (`POST /api/issues/:id/comments`).
 
 BMAD roles (PM, Architect, Developer, Code Reviewer, Product Owner) are implemented
 as Copilot SDK `customAgents` with persona prompts. BMAD processes (create-story,
 dev-story, code-review, sprint-status) are implemented as `defineTool()` tools.
+
+## Paperclip API Reference
+
+- Base URL: `http://localhost:3100` — API prefix: `/api` (no version prefix)
+- Auth: Bearer agent API key (company-scoped)
+- Company-scoped data model: `companyId` (not `orgId`)
+- Entities: **Issues** (not tickets), **Agents** (status: active/paused/terminated)
+- Agent lifecycle: `POST /api/agents/:id/pause`, `/resume`, `/terminate`
+- Issue comments: `POST /api/issues/:id/comments` (primary result reporting)
+- Inbox: `GET /api/agents/me/inbox-lite` (bridge mode)
 
 ## Coding Standards
 

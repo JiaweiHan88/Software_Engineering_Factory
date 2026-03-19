@@ -229,13 +229,16 @@ Each tool:
 
 #### Phase 4 — Delivery Summary
 
+> **⚠️ Refactored (2026-03-19):** Phase 4 was rebuilt to align with the real Paperclip API.
+> See `docs/paperclip-refactoring-plan.md` for the full audit.
+
 **Delivered modules:**
-- `src/adapter/paperclip-client.ts` — Full HTTP client for Paperclip REST API (agents, tickets, heartbeats, status reports, orgs/goals)
-- `src/adapter/reporter.ts` — Structured status reporting back to Paperclip with audit history
-- `src/adapter/paperclip-loop.ts` — Heartbeat-driven integration loop (poll → dispatch → report)
-- `src/adapter/heartbeat-handler.ts` — Upgraded with `handlePaperclipHeartbeat()` bridging Paperclip → BMAD
+- `src/adapter/paperclip-client.ts` — Full HTTP client for real Paperclip REST API (agents, issues, issue comments, org tree, goals, heartbeat runs). Uses `/api` prefix (no version), company-scoped model, push architecture.
+- `src/adapter/reporter.ts` — Reports results back to Paperclip via issue comments (`POST /api/issues/:id/comments`), replaces removed `/reports` endpoint
+- `src/adapter/paperclip-loop.ts` — Issue-driven integration loop: inbox-polling bridge (dev) or webhook receiver (prod). No more heartbeat polling.
+- `src/adapter/heartbeat-handler.ts` — Upgraded with `handlePaperclipIssue()` bridging Paperclip issues → BMAD dispatch
 - `src/adapter/health-check.ts` — Added Paperclip connectivity probe (Probe 5)
-- `src/config/config.ts` — Extended with `PaperclipConfig` (URL, API key, org ID, poll interval, enabled flag)
+- `src/config/config.ts` — Extended with `PaperclipConfig` (URL, agent API key, company ID, inbox check interval, mode: webhook/inbox-polling)
 - `src/index.ts` — Added `--paperclip` CLI mode with SIGINT/SIGTERM graceful shutdown
 - `docker-compose.yml` — Enhanced with BMAD factory service, health checks, `factory` profile
 - `Dockerfile` — Multi-stage build for containerized deployment

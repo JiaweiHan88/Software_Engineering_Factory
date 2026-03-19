@@ -86,7 +86,8 @@ open http://localhost:16686             # Jaeger trace explorer
 
 ```bash
 docker compose up -d                    # Start Paperclip + PostgreSQL
-pnpm start:paperclip                    # Run heartbeat-driven loop
+pnpm start:paperclip                    # Run inbox-polling integration loop
+# Alternative (no Docker):  npx paperclipai onboard --yes
 ```
 
 ### Run tests
@@ -106,7 +107,7 @@ pnpm typecheck                          # TypeScript strict check
 | Single dispatch | `pnpm start -- --dispatch dev-story S-001` | Run one phase for one story |
 | Dry run | `pnpm start:dry-run` | Full pipeline, no SDK calls |
 | Status | `pnpm start:status` | Health check + sprint summary |
-| Paperclip | `pnpm start:paperclip` | Heartbeat-driven loop |
+| Paperclip | `pnpm start:paperclip` | Inbox-polling integration (push model) |
 | With OTel | `pnpm start:otel` | Sprint cycle with telemetry export |
 | MCP server | `pnpm mcp:sprint` | Expose sprint data via MCP |
 
@@ -136,10 +137,10 @@ src/
 │   ├── agent-dispatcher.ts   # Phase → agent routing with model selection
 │   ├── sprint-runner.ts      # Story lifecycle engine
 │   ├── health-check.ts       # 5-probe system readiness check
-│   ├── paperclip-client.ts   # Paperclip REST API client
-│   ├── paperclip-loop.ts     # Heartbeat-driven integration loop
-│   ├── heartbeat-handler.ts  # Paperclip → BMAD bridge
-│   └── reporter.ts           # Status reporting to Paperclip
+│   ├── paperclip-client.ts   # Paperclip REST API client (real API: /api, issues, push model)
+│   ├── paperclip-loop.ts     # Issue-driven integration (inbox-polling bridge / webhook)
+│   ├── heartbeat-handler.ts  # Paperclip Issue → BMAD dispatch bridge
+│   └── reporter.ts           # Reports results via issue comments
 │
 ├── quality-gates/       # BMAD adversarial review system
 │   ├── types.ts         # Severity, findings, verdicts
@@ -249,6 +250,9 @@ Pre-built Grafana dashboard includes:
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP endpoint |
 | `PAPERCLIP_ENABLED` | `false` | Enable Paperclip integration |
 | `PAPERCLIP_URL` | `http://localhost:3100` | Paperclip server URL |
+| `PAPERCLIP_COMPANY_ID` | `bmad-factory` | Company ID (company-scoped) |
+| `PAPERCLIP_AGENT_API_KEY` | — | Agent API key for Bearer auth |
+| `PAPERCLIP_MODE` | `inbox-polling` | Integration mode: `inbox-polling` or `webhook` |
 | `MODEL_PREFER_BYOK` | `false` | Prefer BYOK over Copilot quota |
 | `STALL_AUTO_ESCALATE` | `false` | Auto-escalate stalled stories |
 

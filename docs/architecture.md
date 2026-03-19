@@ -40,14 +40,17 @@
 
 ## Data Flow
 
-### 1. Paperclip Heartbeat → Agent Action
+### 1. Paperclip Issue Assignment → Agent Action (Push Model)
 
 ```
-Paperclip sends heartbeat → {role: "engineer", goal: "implement STORY-003"}
+Paperclip server invokes heartbeat on agent
   ↓
-Heartbeat Adapter receives JSON
+Agent receives assigned issue via inbox or webhook callback
+  (GET /api/agents/me/inbox-lite  or  POST webhook)
   ↓
-Maps role → BmadAgent (e.g., "engineer" → bmad-developer)
+Heartbeat Handler converts PaperclipIssue → HeartbeatContext
+  ↓
+Maps assignee → BmadAgent (e.g., "engineer" → bmad-developer)
   ↓
 Creates Copilot SDK session with agent persona + tools
   ↓
@@ -55,8 +58,12 @@ Sends goal as prompt to agent session
   ↓
 Agent uses tools (read files, write code, run tests)
   ↓
-Adapter returns result to Paperclip
+Result posted back as issue comment (POST /api/issues/:id/comments)
 ```
+
+**Integration modes:**
+- **Inbox-polling bridge** (dev): Periodically checks `GET /api/agents/me/inbox-lite`
+- **Webhook server** (prod): Paperclip calls `POST /api/agents/:id/heartbeat/invoke` → BMAD webhook
 
 ### 2. Story Lifecycle Flow
 
@@ -179,7 +186,7 @@ Complexity-based model selection with 3 tiers:
 | Decision | Rationale |
 |----------|-----------|
 | Copilot SDK over raw LLM calls | Built-in tools, MCP, session management, auto-compaction |
-| Paperclip over custom orchestrator | Production-grade org charts, budgets, governance |
+| Paperclip over custom orchestrator | Production-grade org charts, budgets, governance. Push model: Paperclip invokes heartbeats on agents. Company-scoped data model. Issues (not tickets). Results via issue comments. |
 | Skills over inline prompts | Reusable, versionable methodology as directory modules |
 | Adversarial code review | BMAD's quality-gated loop prevents regressions |
 | TypeScript throughout | Type safety for agent/tool interfaces, SDK is TS-first |

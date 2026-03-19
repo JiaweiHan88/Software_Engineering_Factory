@@ -33,7 +33,7 @@
 import "dotenv/config";
 
 import { resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { PaperclipClient } from "./adapter/paperclip-client.js";
 import type { PaperclipAgent, PaperclipIssue } from "./adapter/paperclip-client.js";
 import { PaperclipReporter } from "./adapter/reporter.js";
@@ -199,6 +199,112 @@ function resolveTools(mapping: RoleMappingEntry): typeof allTools {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Agent 4-File Configuration Loading
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The 4-file Paperclip agent configuration set.
+ *
+ * Following the official `paperclipai/companies` pattern, every agent has:
+ * - AGENTS.md — Entry point: identity, role, memory refs, safety rules
+ * - SOUL.md — Persona: strategic posture + voice & tone
+ * - HEARTBEAT.md — Execution checklist run every heartbeat
+ * - TOOLS.md — Available skills and tools inventory
+ */
+interface AgentConfigFiles {
+  agents: string;
+  soul: string;
+  heartbeat: string;
+  tools: string;
+}
+
+/**
+ * Load the 4-file agent configuration set from disk.
+ *
+ * Reads AGENTS.md, SOUL.md, HEARTBEAT.md, TOOLS.md from the
+ * `agents/{agentConfigDir}/` directory. These are injected as the
+ * system message for the Copilot SDK session, giving the agent its
+ * identity, persona, heartbeat protocol, and tool awareness.
+ *
+ * @param mapping - Role mapping entry with agentConfigDir
+ * @param projectRoot - Factory project root
+ * @returns The 4-file content, or null if the config dir doesn't exist
+ */
+function loadAgentConfigFiles(mapping: RoleMappingEntry, projectRoot: string): AgentConfigFiles | null {
+  const configDir = resolve(projectRoot, "agents", mapping.agentConfigDir);
+
+  if (!existsSync(configDir)) {
+    log.warn("Agent config directory not found", {
+      dir: configDir,
+      agentConfigDir: mapping.agentConfigDir,
+    });
+    return null;
+  }
+
+  const files: Record<keyof AgentConfigFiles, string> = {
+    agents: "AGENTS.md",
+    soul: "SOUL.md",
+    heartbeat: "HEARTBEAT.md",
+    tools: "TOOLS.md",
+  };
+
+  const result: Partial<AgentConfigFiles> = {};
+  let loadedCount = 0;
+
+  for (const [key, filename] of Object.entries(files)) {
+    const filePath = resolve(configDir, filename);
+    if (existsSync(filePath)) {
+      result[key as keyof AgentConfigFiles] = readFileSync(filePath, "utf-8");
+      loadedCount++;
+    } else {
+      log.warn("Agent config file missing", { file: filePath });
+      result[key as keyof AgentConfigFiles] = "";
+    }
+  }
+
+  log.info("Agent config files loaded", {
+    agentConfigDir: mapping.agentConfigDir,
+    filesLoaded: loadedCount,
+    totalFiles: Object.keys(files).length,
+  });
+
+  return result as AgentConfigFiles;
+}
+
+/**
+ * Build the system message from the 4-file agent configuration.
+ *
+ * Concatenates AGENTS.md + SOUL.md + HEARTBEAT.md + TOOLS.md into a
+ * single string suitable for injection as Copilot SDK systemMessage.
+ * Resolves `$AGENT_HOME` placeholder to the actual agent config directory.
+ *
+ * @param configFiles - The loaded 4-file set
+ * @param mapping - Role mapping entry
+ * @param projectRoot - Factory project root
+ * @returns Combined system message string
+ */
+function buildAgentSystemMessage(
+  configFiles: AgentConfigFiles,
+  mapping: RoleMappingEntry,
+  projectRoot: string,
+): string {
+  const agentHome = resolve(projectRoot, "agents", mapping.agentConfigDir);
+
+  const parts = [
+    configFiles.agents,
+    configFiles.soul,
+    configFiles.heartbeat,
+    configFiles.tools,
+  ];
+
+  // Resolve $AGENT_HOME placeholders
+  return parts
+    .filter((p) => p.length > 0)
+    .join("\n\n---\n\n")
+    .replace(/\$AGENT_HOME/g, agentHome);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main Heartbeat Flow
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -300,7 +406,22 @@ async function main(): Promise<void> {
     return;
   }
 
-  // ── Step 6: Bootstrap Copilot SDK (SessionManager + Dispatcher) ─────
+  // ── Step 6: Load agent 4-file configuration ────────────────────────
+  const projectRoot = resolve(import.meta.dirname ?? process.cwd(), "..");
+  const agentConfig = loadAgentConfigFiles(mapping, projectRoot);
+  let agentSystemMessage: string | undefined;
+
+  if (agentConfig) {
+    agentSystemMessage = buildAgentSystemMessage(agentConfig, mapping, projectRoot);
+    log.info("Agent system message built", {
+      length: agentSystemMessage.length,
+      agentConfigDir: mapping.agentConfigDir,
+    });
+  } else {
+    log.warn("No agent config files — falling back to BMAD persona prompt only");
+  }
+
+  // ── Step 7: Bootstrap Copilot SDK (SessionManager + Dispatcher) ─────
   const config = loadConfig();
 
   // Override Paperclip config with env from process adapter
@@ -309,12 +430,17 @@ async function main(): Promise<void> {
   config.paperclip.companyId = env.companyId;
   config.paperclip.enabled = true;
 
+  // Inject agent 4-file system message into config for session creation
+  if (agentSystemMessage) {
+    config.agentSystemMessage = agentSystemMessage;
+  }
+
   const sessionManager = new SessionManager(config);
   await sessionManager.start();
 
   const dispatcher = new AgentDispatcher(sessionManager, config);
 
-  // ── Step 7: Process each assigned issue ─────────────────────────────
+  // ── Step 8: Process each assigned issue ─────────────────────────────
   const bmadRole = mapping.bmadAgentName ?? "ceo";
 
   for (const issue of inbox) {
@@ -347,7 +473,7 @@ async function main(): Promise<void> {
     }
   }
 
-  // ── Step 8: Cleanup ─────────────────────────────────────────────────
+  // ── Step 9: Cleanup ─────────────────────────────────────────────────
   await sessionManager.stop();
 
   const elapsed = Date.now() - startTime;

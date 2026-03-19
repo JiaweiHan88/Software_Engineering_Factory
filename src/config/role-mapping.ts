@@ -20,6 +20,8 @@ export interface RoleMappingEntry {
   displayName: string;
   /** Whether this role orchestrates (delegates) rather than does domain work */
   isOrchestrator: boolean;
+  /** Directory name under agents/ containing the 4-file config set */
+  agentConfigDir: string;
   /** BMAD skill directories this role should have loaded */
   bmadSkills: string[];
   /** Additional Copilot SDK tool names available to this role */
@@ -40,6 +42,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     bmadAgentName: null, // CEO has no BMAD persona — it orchestrates
     displayName: "CEO",
     isOrchestrator: true,
+    agentConfigDir: "ceo",
     bmadSkills: [
       "bmad-help",
     ],
@@ -51,6 +54,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     bmadAgentName: "bmad-pm",
     displayName: "Product Manager (John)",
     isOrchestrator: false,
+    agentConfigDir: "pm",
     bmadSkills: [
       "bmad-brainstorming",
       "bmad-market-research",
@@ -72,6 +76,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     bmadAgentName: "bmad-architect",
     displayName: "Architect (Winston)",
     isOrchestrator: false,
+    agentConfigDir: "architect",
     bmadSkills: [
       "bmad-create-architecture",
       "bmad-technical-research",
@@ -85,6 +90,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     bmadAgentName: "bmad-dev",
     displayName: "Developer (Amelia)",
     isOrchestrator: false,
+    agentConfigDir: "developer",
     bmadSkills: [
       "bmad-dev-story",
       "bmad-quick-dev",
@@ -98,6 +104,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     bmadAgentName: "bmad-qa",
     displayName: "QA Engineer (Quinn)",
     isOrchestrator: false,
+    agentConfigDir: "qa",
     bmadSkills: [
       "bmad-code-review",
       "bmad-review-adversarial-general",
@@ -120,6 +127,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     bmadAgentName: "bmad-sm",
     displayName: "Scrum Master (Bob)",
     isOrchestrator: false,
+    agentConfigDir: "scrum-master",
     bmadSkills: [
       "bmad-sprint-planning",
       "bmad-sprint-status",
@@ -134,6 +142,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     bmadAgentName: "bmad-analyst",
     displayName: "Business Analyst (Mary)",
     isOrchestrator: false,
+    agentConfigDir: "analyst",
     bmadSkills: [
       "bmad-brainstorming",
       "bmad-market-research",
@@ -148,6 +157,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     bmadAgentName: "bmad-ux-designer",
     displayName: "UX Designer (Sally)",
     isOrchestrator: false,
+    agentConfigDir: "ux-designer",
     bmadSkills: [
       "bmad-create-ux-design",
     ],
@@ -159,6 +169,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     bmadAgentName: "bmad-tech-writer",
     displayName: "Technical Writer (Paige)",
     isOrchestrator: false,
+    agentConfigDir: "tech-writer",
     bmadSkills: [
       "bmad-document-project",
       "bmad-generate-project-context",
@@ -176,6 +187,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     bmadAgentName: "bmad-quick-flow-solo-dev",
     displayName: "Quick Flow Solo Dev (Barry)",
     isOrchestrator: false,
+    agentConfigDir: "quick-flow",
     bmadSkills: [
       "bmad-quick-flow-solo-dev",
       "bmad-dev-story",

@@ -99,6 +99,13 @@ export interface BmadConfig {
   paperclip: PaperclipConfig;
   /** Observability settings */
   observability: ObservabilityConfig;
+  /**
+   * Agent system message from Paperclip 4-file configuration.
+   * Injected at runtime by heartbeat-entrypoint.ts after loading
+   * AGENTS.md + SOUL.md + HEARTBEAT.md + TOOLS.md for the active agent role.
+   * Used as systemMessage in Copilot SDK session creation.
+   */
+  agentSystemMessage?: string;
 }
 
 /**

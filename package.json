@@ -9,12 +9,15 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js",
+    "start": "tsx src/index.ts",
+    "start:status": "tsx src/index.ts --status",
+    "start:dry-run": "tsx src/index.ts --dry-run",
     "test": "vitest run",
     "test:watch": "vitest",
     "sandbox:hello": "tsx src/sandbox/hello-copilot.ts",
     "sandbox:agent": "tsx src/sandbox/test-agent.ts",
     "sandbox:tools": "tsx src/sandbox/test-tools.ts",
+    "sandbox:orchestrator": "tsx src/sandbox/test-orchestrator.ts",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit"
   },

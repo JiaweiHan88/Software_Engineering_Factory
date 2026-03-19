@@ -1,19 +1,18 @@
 /**
  * Heartbeat Handler — Paperclip ↔ Copilot SDK Bridge
  *
- * This module translates Paperclip heartbeat events into Copilot SDK sessions.
- * On each heartbeat, it:
- * 1. Checks the agent's assigned ticket from Paperclip
- * 2. Determines which BMAD workflow step to execute
- * 3. Creates or resumes a Copilot SDK session with the appropriate agent
- * 4. Sends the prompt and streams results
- * 5. Reports back to Paperclip
+ * Translates Paperclip heartbeat events into BMAD agent dispatches.
+ * Each heartbeat carries context about an agent's assigned work.
+ * The handler routes it to the AgentDispatcher for execution.
  *
- * TODO (Phase 4): Implement with actual Paperclip API and Copilot SDK.
+ * In Phase 4 this will be called by the Paperclip API integration.
+ * For now it can be called directly by the sprint runner or CLI.
+ *
+ * @module adapter/heartbeat-handler
  */
 
 import { getAgent } from "../agents/registry.js";
-import type { BmadAgent } from "../agents/types.js";
+import type { AgentDispatcher, WorkPhase } from "./agent-dispatcher.js";
 
 export interface HeartbeatContext {
   /** Paperclip agent ID */
@@ -26,24 +25,28 @@ export interface HeartbeatContext {
     title: string;
     description: string;
     storyId?: string;
-    phase?: "create-story" | "dev-story" | "code-review";
+    phase?: WorkPhase;
   };
-  /** Session ID from previous heartbeat (for resume) */
-  previousSessionId?: string;
+  /** Additional context from Paperclip */
+  metadata?: Record<string, unknown>;
 }
 
 export interface HeartbeatResult {
   status: "working" | "completed" | "stalled" | "needs-human";
   message: string;
-  sessionId?: string;
   storyId?: string;
 }
 
 /**
  * Handle a Paperclip heartbeat for a BMAD agent.
+ *
+ * @param ctx - Heartbeat context from Paperclip
+ * @param dispatcher - The agent dispatcher to route work through
+ * @returns Result to report back to Paperclip
  */
 export async function handleHeartbeat(
-  ctx: HeartbeatContext
+  ctx: HeartbeatContext,
+  dispatcher: AgentDispatcher,
 ): Promise<HeartbeatResult> {
   // 1. Resolve the BMAD agent
   const agent = getAgent(ctx.bmadRole);
@@ -63,52 +66,55 @@ export async function handleHeartbeat(
   }
 
   // 3. Determine the BMAD workflow phase
-  const phase = ctx.ticket.phase || inferPhase(agent, ctx.ticket);
-
-  // 4. Create or resume Copilot SDK session
-  // TODO (Phase 4): Replace with actual CopilotClient usage
-  //
-  // const client = new CopilotClient({ cliUrl: "localhost:4321" });
-  // const session = ctx.previousSessionId
-  //   ? await client.resumeSession(ctx.previousSessionId)
-  //   : await client.createSession({
-  //       customAgents: [agent],
-  //       agent: agent.name,
-  //       tools: getToolsForPhase(phase),
-  //       mcpServers: { github: { type: "http", url: "..." } },
-  //     });
-  //
-  // const response = await session.sendAndWait({
-  //   prompt: buildPrompt(agent, ctx.ticket, phase),
-  // });
+  const phase = ctx.ticket.phase ?? inferPhaseFromRole(ctx.bmadRole);
 
   console.log(
-    `[heartbeat] ${agent.displayName} | ${phase} | ticket: ${ctx.ticket.id}`
+    `[heartbeat] ${agent.displayName} | ${phase} | ticket: ${ctx.ticket.id}`,
   );
 
+  // 4. Dispatch to the agent
+  const result = await dispatcher.dispatch(
+    {
+      id: ctx.ticket.id,
+      phase,
+      storyId: ctx.ticket.storyId,
+      storyTitle: ctx.ticket.title,
+      storyDescription: ctx.ticket.description,
+    },
+    (delta) => process.stdout.write(delta),
+  );
+
+  if (!result.success) {
+    return {
+      status: "stalled",
+      message: `${agent.displayName}: Failed — ${result.error}`,
+      storyId: ctx.ticket.storyId,
+    };
+  }
+
   return {
-    status: "working",
-    message: `${agent.displayName}: Working on ${phase} for ${ctx.ticket.title}`,
-    sessionId: "placeholder-session-id",
+    status: "completed",
+    message: `${agent.displayName}: Completed ${phase} for "${ctx.ticket.title}"`,
     storyId: ctx.ticket.storyId,
   };
 }
 
 /**
- * Infer the BMAD phase from agent role and ticket context.
+ * Infer the BMAD phase from agent role when not explicitly provided.
  */
-function inferPhase(
-  agent: BmadAgent,
-  _ticket: NonNullable<HeartbeatContext["ticket"]>
-): string {
-  switch (agent.name) {
+function inferPhaseFromRole(role: string): WorkPhase {
+  switch (role) {
     case "bmad-pm":
+    case "bmad-analyst":
       return "create-story";
-    case "bmad-developer":
+    case "bmad-dev":
+    case "bmad-quick-flow-solo-dev":
       return "dev-story";
-    case "bmad-code-reviewer":
+    case "bmad-qa":
       return "code-review";
+    case "bmad-sm":
+      return "sprint-planning";
     default:
-      return "unknown";
+      return "sprint-status";
   }
 }

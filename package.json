@@ -20,6 +20,10 @@
     "sandbox:tools": "tsx src/sandbox/test-tools.ts",
     "sandbox:orchestrator": "tsx src/sandbox/test-orchestrator.ts",
     "mcp:sprint": "tsx src/mcp/bmad-sprint-server/index.ts",
+    "observability:up": "docker compose -f docker-compose.observability.yml up -d",
+    "observability:down": "docker compose -f docker-compose.observability.yml down",
+    "observability:logs": "docker compose -f docker-compose.observability.yml logs -f",
+    "start:otel": "OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 tsx src/index.ts",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit"
   },

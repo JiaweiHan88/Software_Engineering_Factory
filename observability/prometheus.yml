@@ -1,0 +1,20 @@
+# Prometheus Configuration for BMAD Copilot Factory
+#
+# Scrapes metrics from the OTel Collector's Prometheus exporter endpoint.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # OTel Collector Prometheus exporter (BMAD factory metrics)
+  - job_name: "bmad-factory"
+    static_configs:
+      - targets: ["otel-collector:8889"]
+        labels:
+          service: "bmad-copilot-factory"
+
+  # OTel Collector self-metrics (optional, for debugging the collector itself)
+  - job_name: "otel-collector"
+    static_configs:
+      - targets: ["otel-collector:8888"]

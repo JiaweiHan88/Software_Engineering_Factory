@@ -32,13 +32,14 @@
 | pnpm | ✅ 10.32.1 |
 | Homebrew | ✅ 5.1.0 |
 | GitHub CLI (`gh`) | ✅ Installed (`/opt/homebrew/bin/gh`) |
-| Copilot CLI (`copilot`) | ❌ **Not installed** — needed for live agent sessions |
+| Copilot CLI (`copilot`) | ✅ 1.0.9 (`gh copilot --version`) |
 | Git | ✅ 2.50.1 |
 | Docker | ✅ 29.2.1 |
 | Python | ⚠️ 3.9.6 (system) |
 | TypeScript | ✅ 5.7+ (strict mode, ESM) |
-| Test Suite | ✅ 67 tests passing (vitest 3.2.4) |
+| Test Suite | ✅ 160 tests passing across 10 files (vitest 3.2.4) |
 | OpenTelemetry | ✅ Wired (traces + metrics, OTLP export) |
+| Observability Stack | ✅ Docker Compose with OTel Collector → Jaeger + Prometheus + Grafana |
 
 ---
 
@@ -46,7 +47,6 @@
 
 | # | Action | How | Why |
 |---|--------|-----|-----|
-| **Y5** | **Install Copilot CLI** | `gh extension install github/gh-copilot` | Required for live agent sessions (end-to-end test) |
 | **Y8** | **(Optional) Provide BYOK API keys** | Export `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` | Cost control — avoids using Copilot premium request quota |
 | **Y9** | **Verify Paperclip runs** | `docker compose --profile factory up` | Paperclip integration (Phase 4 runtime) |
 
@@ -57,6 +57,7 @@
 - **GATE 0** — Foundation Tools: ✅ Homebrew, Node.js 25, pnpm 10, GitHub CLI all installed
 - **GATE 1** — Accounts & Credentials: ✅ GitHub repo created and pushed
 - **GATE 2** — Paperclip Setup: ⏳ Docker Compose scaffolded, not yet runtime-tested
+- **Y5** — Copilot CLI: ✅ Version 1.0.9 installed
 
 ---
 
@@ -491,6 +492,34 @@ story status = "review"
 | `bmad.stall.detections` | Counter | story.id, story.phase, stall.duration_minutes |
 | `bmad.sprint.cycles` | Counter | sprint.number, sprint.stories_processed |
 
+**Observability Docker Stack:**
+
+```
+pnpm observability:up                  # Start Jaeger + Prometheus + Grafana
+open http://localhost:3000             # Grafana (admin/bmad)
+open http://localhost:16686            # Jaeger traces
+open http://localhost:9090             # Prometheus
+OTEL_ENABLED=true pnpm start:otel     # Run factory with telemetry export
+```
+
+Components: OTel Collector (OTLP HTTP :4318 → Jaeger + Prometheus), Grafana with pre-built BMAD Factory dashboard (sprint cycles, agent dispatch latency p50/p95/p99, quality gate verdicts pie chart, stall detections, active sessions gauge).
+
+**Test suite (160 tests, 10 files):**
+
+| Test File | Tests | Coverage |
+|-----------|-------|----------|
+| `test/quality-gate-engine.test.ts` | 24 | Gate evaluation, severity scoring, verdict logic |
+| `test/model-strategy.test.ts` | 22 | Complexity classification, model selection, BYOK routing |
+| `test/paperclip-client.test.ts` | 21 | HTTP client: agents, heartbeats, tickets, reports, errors |
+| `test/health-check.test.ts` | 19 | All 5 probes, aggregation, format output |
+| `test/session-manager.test.ts` | 19 | Lifecycle, sessions, model override, tracking |
+| `test/agent-dispatcher.test.ts` | 17 | Phase routing, dispatch flow, error handling |
+| `test/stall-detector.test.ts` | 12 | Phase tracking, threshold detection, repeat flagging |
+| `test/logger.test.ts` | 9 | Level filtering, JSON/human format, error output |
+| `test/review-orchestrator.test.ts` | 9 | Structured finding parser, heuristic parser |
+| `test/sprint-runner.test.ts` | 8 | Lifecycle events, dry-run, filtering, error handling |
+| **Total** | **160** | **All passing ✅** |
+
 ---
 
 ## Timeline Estimate
@@ -516,9 +545,14 @@ story status = "review"
 
 ## Immediate Next Steps
 
-1. **I will now:** Scaffold Phase 0 (project structure, TypeScript config, agent/tool stubs, Docker Compose) — no blockers
-2. **You do (parallel):** Work through GATE 0 items (Y1-Y5) at your pace
-3. **When you're ready:** Tell me "Gate 0 done" and I'll run Phase 1
+**All 8 phases are complete. The factory is ready for a live end-to-end test.**
+
+1. **Start the observability stack:** `pnpm observability:up`
+2. **Write real stories** in `_bmad-output/stories/` and `sprint-status.yaml`
+3. **Run the factory live:** `OTEL_ENABLED=true pnpm start:otel`
+4. **Watch traces in Jaeger** (`http://localhost:16686`) and metrics in Grafana (`http://localhost:3000`)
+
+The ORCH-001/ORCH-002 stories in Sprint 1 were scaffolding test stories for this framework — not real deliverables.
 
 ---
 

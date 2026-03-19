@@ -1,0 +1,309 @@
+{
+  "annotations": { "list": [] },
+  "description": "Autonomous Software Building Factory — Sprint metrics, agent dispatches, quality gates, stall detection",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "icon": "external link",
+      "title": "Jaeger Traces",
+      "type": "link",
+      "url": "http://localhost:16686/search?service=bmad-copilot-factory"
+    }
+  ],
+  "panels": [
+    {
+      "title": "Factory Overview",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "title": "Stories Processed",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "blue", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(bmad_bmad_stories_processed_stories_total) or vector(0)",
+          "legendFormat": "Total"
+        }
+      ]
+    },
+    {
+      "title": "Stories Done",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "yellow", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(bmad_bmad_stories_done_stories_total) or vector(0)",
+          "legendFormat": "Done"
+        }
+      ]
+    },
+    {
+      "title": "Sprint Cycles",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "purple", "value": null }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(bmad_bmad_sprint_cycles_total) or vector(0)",
+          "legendFormat": "Cycles"
+        }
+      ]
+    },
+    {
+      "title": "Active Sessions",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 10,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 3 },
+              { "color": "red", "value": 7 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(bmad_bmad_sessions_active_total) or vector(0)",
+          "legendFormat": "Active"
+        }
+      ]
+    },
+    {
+      "title": "Stall Detections",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 3 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(bmad_bmad_stall_detections_total) or vector(0)",
+          "legendFormat": "Stalls"
+        }
+      ]
+    },
+    {
+      "title": "Review Passes",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(bmad_bmad_review_passes_total) or vector(0)",
+          "legendFormat": "Passes"
+        }
+      ]
+    },
+    {
+      "title": "Agent Performance",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "collapsed": false
+    },
+    {
+      "title": "Dispatch Duration by Agent (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(bmad_bmad_agent_dispatch_duration_ms_bucket[5m])) by (le, agent_name))",
+          "legendFormat": "p50 — {{agent_name}}"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(bmad_bmad_agent_dispatch_duration_ms_bucket[5m])) by (le, agent_name))",
+          "legendFormat": "p95 — {{agent_name}}"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(bmad_bmad_agent_dispatch_duration_ms_bucket[5m])) by (le, agent_name))",
+          "legendFormat": "p99 — {{agent_name}}"
+        }
+      ]
+    },
+    {
+      "title": "Stories Processed by Phase",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (story_phase) (bmad_bmad_stories_processed_stories_total)",
+          "legendFormat": "{{story_phase}}"
+        }
+      ]
+    },
+    {
+      "title": "Quality Gates",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "collapsed": false
+    },
+    {
+      "title": "Gate Verdicts",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 15 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"]
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (gate_verdict) (bmad_bmad_gate_verdicts_total)",
+          "legendFormat": "{{gate_verdict}}"
+        }
+      ]
+    },
+    {
+      "title": "Review Passes Over Time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 15 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "stacking": { "mode": "normal" }
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (story_id) (increase(bmad_bmad_review_passes_total[5m]))",
+          "legendFormat": "{{story_id}}"
+        }
+      ]
+    },
+    {
+      "title": "Gate Severity Scores",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 15 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 20
+          },
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 25 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (story_id) (bmad_bmad_gate_verdicts_total * on() group_left() vector(1))",
+          "legendFormat": "{{story_id}}"
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["bmad", "factory", "copilot"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "BMAD Copilot Factory",
+  "uid": "bmad-factory-overview",
+  "version": 1
+}

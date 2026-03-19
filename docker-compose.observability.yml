@@ -1,0 +1,81 @@
+# BMAD Copilot Factory — Observability Stack
+#
+# Provides distributed tracing, metrics collection, and dashboards
+# for monitoring the autonomous software factory.
+#
+# Usage:
+#   docker compose -f docker-compose.observability.yml up -d
+#   open http://localhost:3000   — Grafana dashboards
+#   open http://localhost:16686  — Jaeger trace explorer
+#   open http://localhost:9090   — Prometheus metrics
+#
+# Then run the factory with OTel enabled:
+#   OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 pnpm start
+#
+# The OTel Collector receives traces + metrics via OTLP HTTP (port 4318)
+# and fans out to Jaeger (traces) and Prometheus (metrics).
+
+services:
+  # ── OTel Collector — central telemetry router ────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+      - "8889:8889"   # Prometheus metrics endpoint (collector self-metrics)
+    depends_on:
+      - jaeger
+    restart: unless-stopped
+
+  # ── Jaeger — distributed tracing backend + UI ────────────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.64
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "14268:14268" # Accept jaeger.thrift over HTTP (from collector)
+      - "14250:14250" # Accept model.proto gRPC (from collector)
+    restart: unless-stopped
+
+  # ── Prometheus — metrics scraping + storage ──────────────────────────────
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"   # Prometheus UI + API
+    depends_on:
+      - otel-collector
+    restart: unless-stopped
+
+  # ── Grafana — dashboards + alerting ──────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.5.2
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=bmad
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"   # Grafana UI
+    depends_on:
+      - prometheus
+      - jaeger
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:

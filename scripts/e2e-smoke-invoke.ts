@@ -600,6 +600,115 @@ async function step5_invokeSpecialistHeartbeat(subIssues: PaperclipIssue[]): Pro
   }
 }
 
+async function step5b_verifyCostTracking(
+  parentIssueId: string,
+  subIssues: PaperclipIssue[],
+): Promise<void> {
+  header("Step 5b: Verify Cost Tracking");
+
+  // ── 5b-1. Check native Paperclip cost events API ────────────────────
+  // POST /api/companies/:companyId/cost-events feeds this.
+  // GET  /api/companies/:companyId/costs/by-agent returns aggregated data.
+  try {
+    const byAgent = await paperclip<Array<{
+      agentId: string;
+      agentName: string | null;
+      costCents: number;
+      inputTokens: number;
+      outputTokens: number;
+    }>>(
+      "GET",
+      `/api/companies/${COMPANY_ID}/costs/by-agent`,
+    );
+
+    if (byAgent.length > 0) {
+      log("✅", `Paperclip /costs/by-agent returned ${byAgent.length} agent(s) with cost data`);
+      for (const row of byAgent) {
+        log("📊", `  ${row.agentName ?? row.agentId.slice(0, 8)}: ${row.costCents}¢, ` +
+          `in=${row.inputTokens} out=${row.outputTokens}`);
+      }
+    } else {
+      log("ℹ️ ", "Paperclip /costs/by-agent returned 0 rows (no cost events recorded yet)");
+    }
+  } catch (err) {
+    log("⚠️ ", `Failed to query Paperclip costs API: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // ── 5b-2. Check markdown comment on issue ───────────────────────────
+  const issueIdsToCheck = [
+    parentIssueId,
+    ...subIssues.map((i) => i.id),
+  ];
+
+  let costCommentFound = false;
+  let costCommentBody = "";
+
+  for (const issueId of issueIdsToCheck) {
+    const comments = await paperclip<PaperclipComment[]>(
+      "GET",
+      `/api/issues/${issueId}/comments`,
+    );
+
+    const costComment = comments.find((c) => c.body.includes("Cost Tracker"));
+    if (costComment) {
+      costCommentFound = true;
+      costCommentBody = costComment.body;
+      log("✅", `Cost tracker comment found on issue ${issueId.slice(0, 8)}`);
+      break;
+    }
+  }
+
+  if (!costCommentFound) {
+    log("⚠️ ", "No cost tracker comment found on any issue");
+    log("ℹ️ ", "The heartbeat-entrypoint may not have reached the cost reporting step");
+    return;
+  }
+
+  // Check if the cost comment is a "no interactions" diagnostic
+  if (costCommentBody.includes("No LLM interactions recorded")) {
+    log("ℹ️ ", "Cost tracker posted but recorded 0 LLM interactions");
+    log("ℹ️ ", "The agent may have used a code path that bypasses the dispatcher");
+    return;
+  }
+
+  // Parse and validate the cost summary content
+  const hasTable = costCommentBody.includes("| Metric | Value |");
+  const hasInteractions = /Interactions \| \d+/.test(costCommentBody);
+  const hasInputTokens = /Input tokens/.test(costCommentBody);
+  const hasOutputTokens = /Output tokens/.test(costCommentBody);
+  const hasCost = /Estimated cost \| \$\d+\.\d{4}/.test(costCommentBody);
+
+  if (hasTable && hasInteractions && hasInputTokens && hasOutputTokens && hasCost) {
+    log("✅", "Cost summary comment has all expected fields");
+
+    const interactionMatch = costCommentBody.match(/Interactions \| (\d+)/);
+    const inputMatch = costCommentBody.match(/Input tokens \(est\.\) \| ([0-9,]+)/);
+    const outputMatch = costCommentBody.match(/Output tokens \(est\.\) \| ([0-9,]+)/);
+    const costMatch = costCommentBody.match(/Estimated cost \| \$([0-9.]+)/);
+
+    log("📊", "Cost tracking results:", {
+      interactions: interactionMatch?.[1] ?? "?",
+      inputTokens: inputMatch?.[1] ?? "?",
+      outputTokens: outputMatch?.[1] ?? "?",
+      estimatedCost: costMatch ? `$${costMatch[1]}` : "?",
+    });
+
+    const interactions = parseInt(interactionMatch?.[1] ?? "0", 10);
+    if (interactions > 0) {
+      log("✅", `Cost tracker recorded ${interactions} LLM interaction(s)`);
+    } else {
+      log("⚠️ ", "Cost tracker shows 0 interactions — unexpected for a live heartbeat");
+    }
+  } else {
+    log("⚠️ ", "Cost summary comment found but missing expected fields");
+    log("  📝", `Table: ${hasTable}, Interactions: ${hasInteractions}, Cost: ${hasCost}`);
+  }
+
+  if (costCommentBody.includes("By Agent")) {
+    log("✅", "Cost summary includes per-agent breakdown");
+  }
+}
+
 async function step6_cleanup(issueId: string, subIssues: PaperclipIssue[]): Promise<void> {
   header("Step 6: Cleanup");
 
@@ -676,6 +785,13 @@ async function main(): Promise<void> {
     await step5_invokeSpecialistHeartbeat(subIssues);
   } catch (err) {
     log("⚠️ ", `Specialist heartbeat error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // 5b. Verify cost tracking
+  try {
+    await step5b_verifyCostTracking(testIssue.id, subIssues);
+  } catch (err) {
+    log("⚠️ ", `Cost tracking verification error: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // 6. Cleanup

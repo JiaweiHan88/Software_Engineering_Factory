@@ -41,11 +41,13 @@ import { SessionManager } from "./adapter/session-manager.js";
 import { AgentDispatcher } from "./adapter/agent-dispatcher.js";
 import { handlePaperclipIssue } from "./adapter/heartbeat-handler.js";
 import { orchestrateCeoIssue } from "./adapter/ceo-orchestrator.js";
+import { withRetry, isPaperclipRetryable } from "./adapter/retry.js";
 import { resolveRoleMapping, PAPERCLIP_SKILLS } from "./config/role-mapping.js";
 import type { RoleMappingEntry } from "./config/role-mapping.js";
 import { loadConfig } from "./config/config.js";
 import { allTools } from "./tools/index.js";
 import { Logger } from "./observability/logger.js";
+import { CostTracker, inferProvider } from "./observability/cost-tracker.js";
 
 const log = Logger.child("heartbeat-entrypoint");
 
@@ -123,7 +125,7 @@ function extractPaperclipEnv(): PaperclipEnv {
  * @param projectRoot - Factory project root
  * @returns Array of absolute paths to skill directories that exist on disk
  */
-function _resolveSkillDirectories(mapping: RoleMappingEntry, projectRoot: string): string[] {
+function resolveSkillDirectories(mapping: RoleMappingEntry, projectRoot: string): string[] {
   const dirs: string[] = [];
 
   // 1. Agent-specific BMAD skills (from skills/ directory in project root)
@@ -175,7 +177,7 @@ function _resolveSkillDirectories(mapping: RoleMappingEntry, projectRoot: string
  * @param mapping - The resolved role mapping entry
  * @returns Array of Tool instances for session creation
  */
-function _resolveTools(mapping: RoleMappingEntry): typeof allTools {
+function resolveTools(mapping: RoleMappingEntry): typeof allTools {
   if (mapping.tools.length === 0) {
     return allTools;
   }
@@ -340,7 +342,10 @@ async function main(): Promise<void> {
     baseUrl: env.url,
     agentApiKey: useAgentKey ? env.agentApiKey : undefined,
     companyId: env.companyId,
-    heartbeatRunId: env.heartbeatRunId,
+    // Only send heartbeat run ID when Paperclip created the run (non-local_trusted).
+    // In local_trusted mode with manual invocation, the run ID doesn't exist in the
+    // heartbeat_runs table, causing FK constraint violations on activity_log writes.
+    heartbeatRunId: useAgentKey ? env.heartbeatRunId : undefined,
   });
 
   log.info("Paperclip client created", {
@@ -355,11 +360,13 @@ async function main(): Promise<void> {
   // With agent-key auth, /api/agents/me resolves the agent from the key.
   let agentSelf: PaperclipAgent;
   try {
-    if (useAgentKey) {
-      agentSelf = await paperclipClient.getAgentSelf();
-    } else {
-      agentSelf = await paperclipClient.getAgent(env.agentId);
-    }
+    const { value } = await withRetry(
+      () => useAgentKey
+        ? paperclipClient.getAgentSelf()
+        : paperclipClient.getAgent(env.agentId),
+      { maxAttempts: 3, label: "identify-agent", isRetryable: isPaperclipRetryable },
+    );
+    agentSelf = value;
     log.info("Agent identified", {
       name: agentSelf.name,
       title: agentSelf.title,
@@ -405,13 +412,18 @@ async function main(): Promise<void> {
   const SKIP_FOR_ORCHESTRATOR = new Set(["done", "cancelled", "in_progress"]);
   let inbox: PaperclipIssue[];
   try {
-    if (useAgentKey) {
-      inbox = await paperclipClient.getAgentInbox();
-    } else {
-      const skipSet = mapping.isOrchestrator ? SKIP_FOR_ORCHESTRATOR : TERMINAL_STATUSES;
-      const allIssues = await paperclipClient.listIssues({ assigneeAgentId: env.agentId });
-      inbox = allIssues.filter((i) => !skipSet.has(i.status));
-    }
+    const { value } = await withRetry(
+      async () => {
+        if (useAgentKey) {
+          return paperclipClient.getAgentInbox();
+        }
+        const skipSet = mapping.isOrchestrator ? SKIP_FOR_ORCHESTRATOR : TERMINAL_STATUSES;
+        const allIssues = await paperclipClient.listIssues({ assigneeAgentId: env.agentId });
+        return allIssues.filter((i) => !skipSet.has(i.status));
+      },
+      { maxAttempts: 3, label: "check-inbox", isRetryable: isPaperclipRetryable },
+    );
+    inbox = value;
     log.info("Inbox checked", { issueCount: inbox.length });
   } catch (err) {
     log.error("Failed to check inbox", {}, err instanceof Error ? err : undefined);
@@ -457,7 +469,8 @@ async function main(): Promise<void> {
   const sessionManager = new SessionManager(config);
   await sessionManager.start();
 
-  const dispatcher = new AgentDispatcher(sessionManager, config);
+  const costTracker = new CostTracker();
+  const dispatcher = new AgentDispatcher(sessionManager, config, costTracker);
 
   // ── Step 8: Process each assigned issue ─────────────────────────────
   const bmadRole = mapping.bmadAgentName ?? "ceo";
@@ -472,8 +485,8 @@ async function main(): Promise<void> {
     try {
       if (mapping.isOrchestrator) {
         // ── Guard: skip if CEO already delegated this issue ────────────
-        // Check if this issue already has sub-issues (children).
-        // Without this, a re-triggered heartbeat would create duplicates.
+        // Defense-in-depth: if sub-issues exist, another heartbeat already
+        // ran delegation. Skip to avoid duplicates.
         const existingChildren = await paperclipClient.listIssues({ parentId: issue.id });
         const activeChildren = existingChildren.filter(
           (c) => c.status !== "cancelled",
@@ -483,12 +496,6 @@ async function main(): Promise<void> {
             issueId: issue.id,
             childCount: activeChildren.length,
           });
-          // Ensure the parent is marked done so we don't revisit
-          try {
-            await paperclipClient.updateIssue(issue.id, { status: "done" });
-          } catch {
-            // best-effort
-          }
           continue;
         }
 
@@ -502,6 +509,7 @@ async function main(): Promise<void> {
           sessionManager,
           config,
           mapping,
+          costTracker,
         );
         log.info("CEO orchestration result", {
           issueId: issue.id,
@@ -527,7 +535,71 @@ async function main(): Promise<void> {
     }
   }
 
-  // ── Step 9: Cleanup ─────────────────────────────────────────────────
+  // ── Step 9: Report cost tracking data to Paperclip ────────────────
+  const costSummary = costTracker.getSummary();
+  const costRecords = costTracker.getRecords();
+  log.info("Cost summary", {
+    interactions: costSummary.interactionCount,
+    inputTokens: costSummary.totalInputTokens,
+    outputTokens: costSummary.totalOutputTokens,
+    estimatedCostUsd: costSummary.totalCostUsd.toFixed(4),
+  });
+
+  // 9a. Report each LLM interaction as a native Paperclip cost event
+  //     POST /api/companies/:companyId/cost-events — feeds the /costs dashboard,
+  //     budget enforcement, and per-agent/per-model spend analytics.
+  const firstIssue = inbox[0];
+  let costEventsPosted = 0;
+
+  for (const record of costRecords) {
+    try {
+      await paperclipClient.reportCostEvent({
+        agentId: env.agentId,
+        issueId: firstIssue?.id ?? null,
+        projectId: firstIssue?.projectId ?? null,
+        heartbeatRunId: env.heartbeatRunId ?? null,
+        provider: inferProvider(record.model),
+        biller: "github_copilot",
+        billingType: "subscription_included",
+        model: record.model,
+        inputTokens: record.inputTokens,
+        outputTokens: record.outputTokens,
+        costCents: Math.round(record.estimatedCostUsd * 100),
+        occurredAt: record.timestamp,
+      });
+      costEventsPosted++;
+    } catch (err) {
+      log.warn("Failed to post cost event to Paperclip", {
+        model: record.model,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (costEventsPosted > 0) {
+    log.info("Cost events posted to Paperclip", { count: costEventsPosted });
+  }
+
+  // 9b. Post human-readable cost summary as issue comment
+  if (firstIssue) {
+    try {
+      const costMarkdown = costSummary.interactionCount > 0
+        ? costTracker.formatSummaryMarkdown()
+        : [
+            "📊 **Cost Tracker** — No LLM interactions recorded",
+            "",
+            "The heartbeat completed without any tracked LLM calls.",
+            `This may indicate the agent used a code path that bypasses the dispatcher.`,
+          ].join("\n");
+      await paperclipClient.addIssueComment(firstIssue.id, costMarkdown);
+    } catch (costReportErr) {
+      log.warn("Failed to post cost summary comment to Paperclip", {
+        error: costReportErr instanceof Error ? costReportErr.message : String(costReportErr),
+      });
+    }
+  }
+
+  // ── Step 10: Cleanup ────────────────────────────────────────────────
   await sessionManager.stop();
 
   const elapsed = Date.now() - startTime;
@@ -535,6 +607,7 @@ async function main(): Promise<void> {
     durationMs: elapsed,
     outcome: "completed",
     issuesProcessed: inbox.length,
+    estimatedCostUsd: costSummary.totalCostUsd,
   });
 }
 

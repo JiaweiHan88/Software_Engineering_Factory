@@ -30,6 +30,7 @@ import { traceAgentDispatch } from "../observability/tracing.js";
 import { recordDispatchDuration } from "../observability/metrics.js";
 import { resolveModel, loadModelStrategyConfig } from "../config/model-strategy.js";
 import type { ModelStrategyConfig, ComplexitySignals } from "../config/model-strategy.js";
+import type { CostTracker } from "../observability/cost-tracker.js";
 
 const log = Logger.child("agent-dispatcher");
 
@@ -386,10 +387,12 @@ export class AgentDispatcher {
   private config: BmadConfig;
   private skillDirs: string[];
   private modelStrategy: ModelStrategyConfig;
+  private costTracker: CostTracker | undefined;
 
-  constructor(sessionManager: SessionManager, config: BmadConfig) {
+  constructor(sessionManager: SessionManager, config: BmadConfig, costTracker?: CostTracker) {
     this.sessionManager = sessionManager;
     this.config = config;
+    this.costTracker = costTracker;
     this.modelStrategy = loadModelStrategyConfig();
 
     // Resolve skill directories — filter to only directories that exist on disk
@@ -482,6 +485,17 @@ export class AgentDispatcher {
             onDelta,
           );
 
+          // Record token usage for cost tracking
+          if (this.costTracker) {
+            this.costTracker.recordUsage(
+              agent.name,
+              modelSelection.model,
+              prompt,
+              response,
+              { sessionId, phase: item.phase },
+            );
+          }
+
           // Close the session (one-shot per phase)
           await this.sessionManager.closeSession(sessionId);
 
@@ -552,6 +566,17 @@ export class AgentDispatcher {
         300_000,
         onDelta,
       );
+
+      // Record token usage for cost tracking
+      if (this.costTracker) {
+        this.costTracker.recordUsage(
+          agent.name,
+          "default", // dispatchDirect doesn't go through model selection
+          `@${agentName} ${prompt}`,
+          response,
+          { sessionId, phase: "delegated-task" },
+        );
+      }
 
       await this.sessionManager.closeSession(sessionId);
 

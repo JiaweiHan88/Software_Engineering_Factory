@@ -36,6 +36,7 @@ import { AgentDispatcher } from "../src/adapter/agent-dispatcher.js";
 import type { WorkItem } from "../src/adapter/agent-dispatcher.js";
 import type { SessionManager } from "../src/adapter/session-manager.js";
 import type { BmadConfig } from "../src/config/config.js";
+import { CostTracker } from "../src/observability/cost-tracker.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixtures
@@ -447,6 +448,78 @@ describe("AgentDispatcher", () => {
       const sendCall = (mockMgr.sendAndWait as ReturnType<typeof vi.fn>).mock.calls[0];
       const prompt = sendCall[1] as string;
       expect(prompt).toContain("@bmad-dev Explain this.");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Cost Tracking Integration
+  // ─────────────────────────────────────────────────────────────────────────
+
+  describe("cost tracking", () => {
+    let costTracker: CostTracker;
+    let trackedDispatcher: AgentDispatcher;
+
+    beforeEach(() => {
+      costTracker = new CostTracker();
+      trackedDispatcher = new AgentDispatcher(mockMgr, makeConfig(), costTracker);
+    });
+
+    it("records usage after successful dispatch", async () => {
+      const item: WorkItem = { id: "w-cost-1", phase: "dev-story", storyId: "S-001" };
+      await trackedDispatcher.dispatch(item);
+
+      const records = costTracker.getRecords();
+      expect(records).toHaveLength(1);
+      expect(records[0].agentName).toBe("bmad-dev");
+      expect(records[0].phase).toBe("dev-story");
+      expect(records[0].sessionId).toBe("session-test-123");
+      expect(records[0].inputTokens).toBeGreaterThan(0);
+      expect(records[0].outputTokens).toBeGreaterThan(0);
+      expect(records[0].estimatedCostUsd).toBeGreaterThan(0);
+    });
+
+    it("records usage after dispatchDirect", async () => {
+      await trackedDispatcher.dispatchDirect("bmad-dev", "Explain the architecture.");
+
+      const records = costTracker.getRecords();
+      expect(records).toHaveLength(1);
+      expect(records[0].agentName).toBe("bmad-dev");
+      expect(records[0].phase).toBe("delegated-task");
+    });
+
+    it("does not record usage when dispatch fails (agent not found)", async () => {
+      const item: WorkItem = { id: "w-cost-2", phase: "dev-story", agentOverride: "nonexistent" };
+      await trackedDispatcher.dispatch(item);
+
+      expect(costTracker.getRecords()).toHaveLength(0);
+    });
+
+    it("does not record usage when sendAndWait throws", async () => {
+      (mockMgr.sendAndWait as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("timeout"));
+
+      const item: WorkItem = { id: "w-cost-3", phase: "dev-story", storyId: "S-001" };
+      await trackedDispatcher.dispatch(item);
+
+      expect(costTracker.getRecords()).toHaveLength(0);
+    });
+
+    it("accumulates records across multiple dispatches", async () => {
+      await trackedDispatcher.dispatch({ id: "w1", phase: "dev-story", storyId: "S-001" });
+      await trackedDispatcher.dispatch({ id: "w2", phase: "code-review", storyId: "S-001" });
+      await trackedDispatcher.dispatch({ id: "w3", phase: "sprint-status" });
+
+      const summary = costTracker.getSummary();
+      expect(summary.interactionCount).toBe(3);
+      expect(Object.keys(summary.byAgent).length).toBeGreaterThanOrEqual(2);
+      expect(summary.totalCostUsd).toBeGreaterThan(0);
+    });
+
+    it("works without cost tracker (backward compatible)", async () => {
+      // Original dispatcher without cost tracker should still work
+      const item: WorkItem = { id: "w-compat", phase: "dev-story", storyId: "S-001" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
     });
   });
 });

@@ -23,6 +23,7 @@ import type { PaperclipReporter } from "./reporter.js";
 import type { SessionManager } from "./session-manager.js";
 import type { BmadConfig } from "../config/config.js";
 import type { RoleMappingEntry } from "../config/role-mapping.js";
+import type { CostTracker } from "../observability/cost-tracker.js";
 import { getAgent, allAgents } from "../agents/registry.js";
 import { allTools } from "../tools/index.js";
 import { Logger } from "../observability/logger.js";
@@ -311,6 +312,7 @@ export async function orchestrateCeoIssue(
   sessionManager: SessionManager,
   config: BmadConfig,
   _mapping: RoleMappingEntry,
+  costTracker?: CostTracker,
 ): Promise<OrchestrationResult> {
   log.info("CEO orchestration starting", {
     issueId: issue.id,
@@ -386,6 +388,17 @@ export async function orchestrateCeoIssue(
 
   // Close session — CEO doesn't need multi-turn for delegation
   await sessionManager.closeSession(sessionId);
+
+  // Record token usage for cost tracking (CEO bypasses AgentDispatcher)
+  if (costTracker) {
+    costTracker.recordUsage(
+      "ceo",
+      config.model ?? "default",
+      prompt,
+      response,
+      { sessionId, phase: "ceo-delegation" },
+    );
+  }
 
   // ── 4. Parse the delegation plan ──────────────────────────────────
   const plan = parseDelegationPlan(response);

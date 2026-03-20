@@ -664,5 +664,68 @@ describe("orchestrateCeoIssue", () => {
     );
     expect(errorComments).toHaveLength(0);
   });
-});
 
+  it("records cost when CostTracker is provided", async () => {
+    const plan = {
+      analysis: "Simple task",
+      phases: ["execute"],
+      tasks: [
+        { title: "Do the thing", description: "Just do it", assignTo: "bmad-dev", priority: "medium", phase: "execute" },
+      ],
+      requiresApproval: false,
+    };
+
+    const { CostTracker } = await import("../src/observability/cost-tracker.js");
+    const costTracker = new CostTracker();
+
+    const client = createMockClient();
+    const sessionManager = createMockSessionManager(JSON.stringify(plan));
+
+    await orchestrateCeoIssue(
+      mockIssue,
+      mockCeoAgent,
+      client,
+      createMockReporter(),
+      sessionManager,
+      createMockConfig(),
+      mockMapping,
+      costTracker,
+    );
+
+    const summary = costTracker.getSummary();
+    expect(summary.interactionCount).toBe(1);
+    expect(summary.totalInputTokens).toBeGreaterThan(0);
+    expect(summary.totalOutputTokens).toBeGreaterThan(0);
+
+    const records = costTracker.getRecords();
+    expect(records[0].agentName).toBe("ceo");
+    expect(records[0].phase).toBe("ceo-delegation");
+  });
+
+  it("does not fail when CostTracker is omitted (backward compatible)", async () => {
+    const plan = {
+      analysis: "Simple task",
+      phases: ["execute"],
+      tasks: [
+        { title: "Do it", description: "Go", assignTo: "bmad-dev", priority: "medium", phase: "execute" },
+      ],
+      requiresApproval: false,
+    };
+
+    const client = createMockClient();
+    const sessionManager = createMockSessionManager(JSON.stringify(plan));
+
+    // No costTracker arg — should not throw
+    const result = await orchestrateCeoIssue(
+      mockIssue,
+      mockCeoAgent,
+      client,
+      createMockReporter(),
+      sessionManager,
+      createMockConfig(),
+      mockMapping,
+    );
+
+    expect(result.success).toBe(true);
+  });
+});

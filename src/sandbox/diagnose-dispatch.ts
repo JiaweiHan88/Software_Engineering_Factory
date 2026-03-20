@@ -92,7 +92,7 @@ async function main() {
   let turnCount = 0;
   let toolCallCount = 0;
   session.on((event) => {
-    const ts = new Date().toISOString().slice(11, 23);
+    const _ts = new Date().toISOString().slice(11, 23);
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     if (event.type === "assistant.message_delta") {
       process.stdout.write(event.data.deltaContent);

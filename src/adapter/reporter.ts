@@ -15,7 +15,7 @@
  * @module adapter/reporter
  */
 
-import type { PaperclipClient, PaperclipIssue } from "./paperclip-client.js";
+import type { PaperclipClient } from "./paperclip-client.js";
 import type { DispatchResult } from "./agent-dispatcher.js";
 import type { HeartbeatResult } from "./heartbeat-handler.js";
 import type { SprintEvent } from "./sprint-runner.js";

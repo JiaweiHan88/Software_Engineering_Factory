@@ -44,7 +44,6 @@ import { orchestrateCeoIssue } from "./adapter/ceo-orchestrator.js";
 import { resolveRoleMapping, PAPERCLIP_SKILLS } from "./config/role-mapping.js";
 import type { RoleMappingEntry } from "./config/role-mapping.js";
 import { loadConfig } from "./config/config.js";
-import { allAgents } from "./agents/registry.js";
 import { allTools } from "./tools/index.js";
 import { Logger } from "./observability/logger.js";
 
@@ -124,7 +123,7 @@ function extractPaperclipEnv(): PaperclipEnv {
  * @param projectRoot - Factory project root
  * @returns Array of absolute paths to skill directories that exist on disk
  */
-function resolveSkillDirectories(mapping: RoleMappingEntry, projectRoot: string): string[] {
+function _resolveSkillDirectories(mapping: RoleMappingEntry, projectRoot: string): string[] {
   const dirs: string[] = [];
 
   // 1. Agent-specific BMAD skills (from skills/ directory in project root)
@@ -176,7 +175,7 @@ function resolveSkillDirectories(mapping: RoleMappingEntry, projectRoot: string)
  * @param mapping - The resolved role mapping entry
  * @returns Array of Tool instances for session creation
  */
-function resolveTools(mapping: RoleMappingEntry): typeof allTools {
+function _resolveTools(mapping: RoleMappingEntry): typeof allTools {
   if (mapping.tools.length === 0) {
     return allTools;
   }
@@ -329,22 +328,34 @@ async function main(): Promise<void> {
     heartbeatRunId: env.heartbeatRunId ?? "n/a",
   });
 
-  // ── Step 2: Create Paperclip client (with this agent's API key) ─────
+  // ── Step 2: Create Paperclip client ──────────────────────────────────
+  // In local_trusted mode (process adapter), we use board-level access
+  // (no auth header). Agent API keys are per-agent and using a mismatched
+  // key causes ownership conflicts. Only send the agent API key in
+  // authenticated mode where each agent has its own key.
+  const deploymentMode = process.env.PAPERCLIP_DEPLOYMENT_MODE;
+  const useAgentKey = deploymentMode !== "local_trusted" && !!env.agentApiKey;
+
   const paperclipClient = new PaperclipClient({
     baseUrl: env.url,
-    agentApiKey: env.agentApiKey,
+    agentApiKey: useAgentKey ? env.agentApiKey : undefined,
     companyId: env.companyId,
+    heartbeatRunId: env.heartbeatRunId,
+  });
+
+  log.info("Paperclip client created", {
+    authMode: useAgentKey ? "agent-key" : "board-access",
+    deploymentMode: deploymentMode ?? "unknown",
   });
 
   const reporter = new PaperclipReporter(paperclipClient);
 
   // ── Step 3: Identify self ─────────────────────────────────────────
-  // In process adapter mode (local_trusted), we use GET /api/agents/:id
-  // because /api/agents/me requires agent-key auth which the process
-  // adapter doesn't inject. With an agent API key, we try /me first.
+  // In board-access mode, use GET /api/agents/:id (no auth needed).
+  // With agent-key auth, /api/agents/me resolves the agent from the key.
   let agentSelf: PaperclipAgent;
   try {
-    if (env.agentApiKey) {
+    if (useAgentKey) {
       agentSelf = await paperclipClient.getAgentSelf();
     } else {
       agentSelf = await paperclipClient.getAgent(env.agentId);
@@ -385,14 +396,21 @@ async function main(): Promise<void> {
   });
 
   // ── Step 5: Check inbox for assigned work ───────────────────────────
-  // In process adapter mode (local_trusted), /agents/me/inbox-lite requires
-  // agent-key auth. Use listIssues with assignee filter instead.
+  // In board-access mode, /agents/me/inbox-lite doesn't work (no agent key).
+  // Use listIssues with assignee filter instead.
+  // Filter to actionable statuses only — skip done/cancelled issues.
+  // For orchestrator (CEO): also skip in_progress — that means delegation
+  // already happened and sub-tasks are being worked on.
+  const TERMINAL_STATUSES = new Set(["done", "cancelled"]);
+  const SKIP_FOR_ORCHESTRATOR = new Set(["done", "cancelled", "in_progress"]);
   let inbox: PaperclipIssue[];
   try {
-    if (env.agentApiKey) {
+    if (useAgentKey) {
       inbox = await paperclipClient.getAgentInbox();
     } else {
-      inbox = await paperclipClient.listIssues({ assigneeAgentId: env.agentId });
+      const skipSet = mapping.isOrchestrator ? SKIP_FOR_ORCHESTRATOR : TERMINAL_STATUSES;
+      const allIssues = await paperclipClient.listIssues({ assigneeAgentId: env.agentId });
+      inbox = allIssues.filter((i) => !skipSet.has(i.status));
     }
     log.info("Inbox checked", { issueCount: inbox.length });
   } catch (err) {
@@ -453,6 +471,27 @@ async function main(): Promise<void> {
 
     try {
       if (mapping.isOrchestrator) {
+        // ── Guard: skip if CEO already delegated this issue ────────────
+        // Check if this issue already has sub-issues (children).
+        // Without this, a re-triggered heartbeat would create duplicates.
+        const existingChildren = await paperclipClient.listIssues({ parentId: issue.id });
+        const activeChildren = existingChildren.filter(
+          (c) => c.status !== "cancelled",
+        );
+        if (activeChildren.length > 0) {
+          log.info("Skipping already-delegated issue (has active sub-issues)", {
+            issueId: issue.id,
+            childCount: activeChildren.length,
+          });
+          // Ensure the parent is marked done so we don't revisit
+          try {
+            await paperclipClient.updateIssue(issue.id, { status: "done" });
+          } catch {
+            // best-effort
+          }
+          continue;
+        }
+
         // CEO orchestrator: use Copilot SDK session to analyze issue,
         // produce a structured delegation plan, and create sub-issues
         const result = await orchestrateCeoIssue(

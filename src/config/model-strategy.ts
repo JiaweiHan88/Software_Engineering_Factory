@@ -97,11 +97,33 @@ const DEFAULT_TIER_MODELS: Record<ModelTier, TierModelConfig> = {
  * Phase-to-tier mapping. Determines baseline complexity from the work phase.
  */
 const PHASE_TIER_MAP: Record<WorkPhase, ModelTier> = {
+  // Core story lifecycle
   "sprint-status": "fast",
   "sprint-planning": "standard",
   "create-story": "standard",
   "dev-story": "standard",
   "code-review": "powerful",
+  // Research phase
+  "research": "standard",
+  "domain-research": "standard",
+  "market-research": "standard",
+  "technical-research": "standard",
+  // Define phase
+  "create-prd": "standard",
+  "create-architecture": "powerful",
+  "create-ux-design": "standard",
+  "create-product-brief": "standard",
+  // Plan phase
+  "create-epics": "standard",
+  "check-implementation-readiness": "standard",
+  // Execute phase (extensions)
+  "e2e-tests": "standard",
+  "documentation": "fast",
+  "quick-dev": "standard",
+  // Review phase (extensions)
+  "editorial-review": "fast",
+  // Generic delegated work
+  "delegated-task": "standard",
 };
 
 /**

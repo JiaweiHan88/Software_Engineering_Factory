@@ -309,7 +309,7 @@ export async function orchestrateCeoIssue(
   reporter: PaperclipReporter,
   sessionManager: SessionManager,
   config: BmadConfig,
-  mapping: RoleMappingEntry,
+  _mapping: RoleMappingEntry,
 ): Promise<OrchestrationResult> {
   log.info("CEO orchestration starting", {
     issueId: issue.id,
@@ -495,13 +495,10 @@ export async function orchestrateCeoIssue(
 
   await client.addIssueComment(issue.id, summaryLines.join("\n"));
 
-  // Update parent issue status to in_progress (CEO is monitoring)
-  try {
-    await client.updateIssue(issue.id, { status: "in_progress" });
-  } catch {
-    // Non-critical — status update may fail if issue is already in_progress
-    log.debug("Could not update parent issue status", { issueId: issue.id });
-  }
+  // The parent issue stays in_progress — it was set to in_progress at the
+  // start of orchestration. The CEO's inbox filter skips in_progress issues,
+  // so it won't re-process on the next heartbeat. The issue should only be
+  // marked done when all sub-tasks are complete (future: rollup logic).
 
   log.info("CEO orchestration complete", {
     issueId: issue.id,

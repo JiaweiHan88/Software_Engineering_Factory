@@ -462,6 +462,8 @@ export async function orchestrateCeoIssue(
         // on a locked issue causes Paperclip to 500. We link via PATCH after.
         assigneeAgentId: assigneeId,
         goalId: issue.goalId,
+        // Propagate projectId so sub-issues live in the same project workspace
+        projectId: issue.projectId,
         metadata: {
           bmadPhase: task.phase,
           parentIssueId: issue.id,

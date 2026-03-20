@@ -22,6 +22,7 @@
 
 import "dotenv/config";
 import { spawn } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -51,6 +52,15 @@ const FLAGS = {
   skipCleanup: process.argv.includes("--skip-cleanup"),
   verbose: process.argv.includes("--verbose"),
 };
+
+/** E2E project name in Paperclip — reused across runs. */
+const E2E_PROJECT_NAME = "bmad-e2e-smoke";
+
+/** Resolved at runtime — the workspace directory where agents write code. */
+let targetWorkspaceDir: string | undefined;
+
+/** Resolved at runtime — the Paperclip project ID for workspace isolation. */
+let projectId: string | undefined;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -125,6 +135,9 @@ async function invokeHeartbeat(agentId: string, label: string): Promise<{
         // heartbeat_runs row. Sending a fabricated UUID causes an FK
         // violation in activity_log.run_id → heartbeat_runs.id.
         PAPERCLIP_DEPLOYMENT_MODE: "local_trusted",
+        // Workspace isolation: agent-generated code goes to the Paperclip
+        // project's managed folder, not into this factory repo.
+        ...(targetWorkspaceDir ? { TARGET_PROJECT_ROOT: targetWorkspaceDir } : {}),
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -144,17 +157,21 @@ async function invokeHeartbeat(agentId: string, label: string): Promise<{
       if (FLAGS.verbose) process.stderr.write(`  [${label}] ${chunk}`);
     });
 
-    child.on("close", (code) => {
-      resolve({ exitCode: code ?? 1, stdout, stderr });
-    });
-
-    child.on("error", reject);
-
-    // Timeout: 5 minutes
-    setTimeout(() => {
+    // Timeout: 5 minutes — must be cleared on close to prevent Node from hanging
+    const timer = setTimeout(() => {
       child.kill("SIGTERM");
       reject(new Error(`${label} heartbeat timed out after 5 minutes`));
     }, 300_000);
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ exitCode: code ?? 1, stdout, stderr });
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
   });
 }
 
@@ -192,6 +209,71 @@ function header(msg: string): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Paperclip Project / Workspace Isolation
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface PaperclipProject {
+  id: string;
+  name: string;
+  codebase?: {
+    managedFolder?: string;
+    effectiveLocalFolder?: string;
+    localFolder?: string | null;
+    repoUrl?: string | null;
+    origin?: string;
+  };
+}
+
+/**
+ * Ensure a dedicated Paperclip project exists for E2E runs.
+ * Returns the project ID and the workspace directory (managedFolder)
+ * where agent-generated code should land — NOT in this repo.
+ */
+async function ensureE2eProject(): Promise<{ projectId: string; workspaceDir: string }> {
+  // List existing projects and reuse if already created
+  const projects = await paperclip<PaperclipProject[]>(
+    "GET",
+    `/api/companies/${COMPANY_ID}/projects`,
+  );
+  let project = projects.find((p) => p.name === E2E_PROJECT_NAME);
+
+  if (!project) {
+    project = await paperclip<PaperclipProject>(
+      "POST",
+      `/api/companies/${COMPANY_ID}/projects`,
+      { name: E2E_PROJECT_NAME, description: "E2E smoke test workspace — auto-created" },
+    );
+    log("🆕", "Created Paperclip project", { name: project.name, id: project.id });
+  } else {
+    log("♻️ ", "Reusing Paperclip project", { name: project.name, id: project.id });
+  }
+
+  // Resolve workspace directory — Paperclip auto-creates a managedFolder
+  const wsDir = project.codebase?.effectiveLocalFolder
+    ?? project.codebase?.managedFolder;
+
+  if (!wsDir) {
+    // Fallback: re-fetch to get the full project with codebase info
+    const allProjects = await paperclip<PaperclipProject[]>(
+      "GET",
+      `/api/companies/${COMPANY_ID}/projects`,
+    );
+    const refetched = allProjects.find((p) => p.id === project!.id);
+    const dir = refetched?.codebase?.effectiveLocalFolder
+      ?? refetched?.codebase?.managedFolder;
+    if (!dir) {
+      throw new Error(
+        `Paperclip project ${project.id} has no managedFolder — ` +
+        `cannot isolate workspace. Raw codebase: ${JSON.stringify(refetched?.codebase)}`,
+      );
+    }
+    return { projectId: project.id, workspaceDir: dir };
+  }
+
+  return { projectId: project.id, workspaceDir: wsDir };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // E2E Pipeline Steps
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -221,6 +303,13 @@ async function step1_checkPrereqs(): Promise<void> {
 
   // Check gh auth
   log("ℹ️ ", "GHE auth assumed OK (gh auth status showed logged in)");
+
+  // Set up workspace isolation — agents write code to a separate directory
+  const e2eProject = await ensureE2eProject();
+  projectId = e2eProject.projectId;
+  targetWorkspaceDir = e2eProject.workspaceDir;
+  mkdirSync(targetWorkspaceDir, { recursive: true });
+  log("📂", `Agent workspace: ${targetWorkspaceDir}`);
 }
 
 async function step2_createTestIssue(): Promise<PaperclipIssue> {
@@ -254,6 +343,8 @@ async function step2_createTestIssue(): Promise<PaperclipIssue> {
       status: "backlog",
       priority: "low",
       assigneeAgentId: AGENTS.ceo,
+      // Link to isolated project so sub-issues inherit the workspace
+      ...(projectId ? { projectId } : {}),
       metadata: {
         e2eTest: true,
         createdBy: "e2e-smoke.ts",
@@ -552,7 +643,13 @@ async function main(): Promise<void> {
   header("E2E Smoke Test Summary");
   log("⏱️ ", `Total time: ${elapsed}s`);
   log("📊", `Sub-issues created by CEO: ${subIssues.length}`);
+  if (targetWorkspaceDir) {
+    log("📂", `Agent workspace: ${targetWorkspaceDir}`);
+  }
   log("✅", "Pipeline validated successfully!");
+
+  // Explicitly exit — prevents dangling timers or handles from keeping Node alive
+  process.exit(0);
 }
 
 main().catch((err) => {

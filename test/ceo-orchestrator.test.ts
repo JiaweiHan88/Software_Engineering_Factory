@@ -306,6 +306,7 @@ describe("orchestrateCeoIssue", () => {
   function createMockClient() {
     return {
       listAgents: vi.fn().mockResolvedValue(mockAgentList),
+      listIssues: vi.fn().mockResolvedValue([]),
       createIssue: vi.fn().mockImplementation(async (issue: Partial<PaperclipIssue>) => ({
         id: `sub-${Math.random().toString(36).slice(2, 8)}`,
         ...issue,
@@ -378,8 +379,16 @@ describe("orchestrateCeoIssue", () => {
     const firstCall = client.createIssue.mock.calls[0][0];
     expect(firstCall.title).toBe("Research API patterns");
     expect(firstCall.assigneeAgentId).toBe("uuid-analyst");
-    expect(firstCall.parentId).toBe("issue-1");
+    // parentId is set via updateIssue after creation (avoids execution-lock 500)
+    expect(firstCall.parentId).toBeUndefined();
     expect(firstCall.status).toBe("todo");
+
+    // Verify parentId was linked via updateIssue
+    const updateCalls = client.updateIssue.mock.calls;
+    const parentIdUpdates = updateCalls.filter(
+      (c: unknown[]) => (c[1] as Record<string, unknown>).parentId === "issue-1",
+    );
+    expect(parentIdUpdates).toHaveLength(2);
 
     const secondCall = client.createIssue.mock.calls[1][0];
     expect(secondCall.title).toBe("Implement the API");
@@ -580,4 +589,80 @@ describe("orchestrateCeoIssue", () => {
     expect(lastComment).toContain("Implement feature");
     expect(lastComment).toContain("bmad-dev");
   });
+
+  it("recovers phantom 500 by matching metadata.parentIssueId (not parentId)", async () => {
+    // Reproduces the phantom-500 bug: createIssue returns 500 after the write
+    // succeeds. The sub-issue exists but has no parentId (omitted at creation
+    // to avoid execution-lock 500). The fix must use metadata.parentIssueId.
+    const plan = {
+      analysis: "Single task plan",
+      phases: ["execute"],
+      tasks: [
+        {
+          title: "Build feature X",
+          description: "Implement feature X",
+          assignTo: "bmad-dev",
+          priority: "high",
+          phase: "execute",
+        },
+      ],
+      requiresApproval: false,
+    };
+
+    const phantomIssue: PaperclipIssue = {
+      id: "sub-phantom-1",
+      title: "Build feature X",
+      description: "Implement feature X",
+      status: "todo",
+      assigneeAgentId: "uuid-dev",
+      // No parentId — intentionally omitted at creation time
+      metadata: {
+        bmadPhase: "execute",
+        parentIssueId: "issue-1", // ← set at creation time
+        delegatedBy: "ceo",
+      },
+    };
+
+    const { PaperclipApiError } = await import("../src/adapter/paperclip-client.js");
+    const client = createMockClient();
+    // createIssue throws a phantom 500 (write succeeded server-side)
+    client.createIssue.mockRejectedValue(
+      new PaperclipApiError(500, "POST /api/companies/c1/issues", "Internal Server Error"),
+    );
+    // listIssues returns the phantom issue (filtered by assigneeAgentId)
+    client.listIssues.mockResolvedValue([phantomIssue]);
+
+    const sessionManager = createMockSessionManager(JSON.stringify(plan));
+
+    const result = await orchestrateCeoIssue(
+      mockIssue,
+      mockCeoAgent,
+      client,
+      createMockReporter(),
+      sessionManager,
+      createMockConfig(),
+      mockMapping,
+    );
+
+    // Phantom was detected — counts as success
+    expect(result.success).toBe(true);
+    expect(result.subtasksCreated).toBe(1);
+
+    // listIssues was called with assigneeAgentId (not parentId)
+    expect(client.listIssues).toHaveBeenCalledWith({ assigneeAgentId: "uuid-dev" });
+
+    // Parent link was applied retroactively
+    const parentLinkCall = client.updateIssue.mock.calls.find(
+      (c: unknown[]) => c[0] === "sub-phantom-1",
+    );
+    expect(parentLinkCall).toBeDefined();
+    expect((parentLinkCall![1] as Record<string, unknown>).parentId).toBe("issue-1");
+
+    // No error comment was posted for this task
+    const errorComments = (client.addIssueComment.mock.calls as unknown[][]).filter(
+      (c) => typeof c[1] === "string" && (c[1] as string).includes("Failed to create"),
+    );
+    expect(errorComments).toHaveLength(0);
+  });
 });
+

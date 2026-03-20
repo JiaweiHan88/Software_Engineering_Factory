@@ -17,6 +17,7 @@
  * @module adapter/ceo-orchestrator
  */
 
+import { PaperclipApiError } from "./paperclip-client.js";
 import type { PaperclipClient, PaperclipAgent, PaperclipIssue } from "./paperclip-client.js";
 import type { PaperclipReporter } from "./reporter.js";
 import type { SessionManager } from "./session-manager.js";
@@ -442,7 +443,9 @@ export async function orchestrateCeoIssue(
         ].join("\n"),
         status: "todo",
         priority: task.priority,
-        parentId: issue.id,
+        // NOTE: parentId is omitted during creation because the parent issue
+        // has an execution lock (CEO heartbeat is running). Setting parentId
+        // on a locked issue causes Paperclip to 500. We link via PATCH after.
         assigneeAgentId: assigneeId,
         goalId: issue.goalId,
         metadata: {
@@ -451,6 +454,17 @@ export async function orchestrateCeoIssue(
           delegatedBy: "ceo",
         },
       });
+
+      // Link to parent issue via PATCH (after creation succeeds)
+      try {
+        await client.updateIssue(subIssue.id, { parentId: issue.id });
+      } catch {
+        // Non-critical — the metadata already records the relationship
+        log.warn("Could not link sub-issue to parent (non-critical)", {
+          subIssueId: subIssue.id,
+          parentId: issue.id,
+        });
+      }
 
       createdIssueIds.push(subIssue.id);
       subtasksCreated++;
@@ -461,7 +475,47 @@ export async function orchestrateCeoIssue(
         assignTo: task.assignTo,
         assigneeId: assigneeId ?? "unassigned",
       });
-    } catch (err) {
+    } catch (err: unknown) {
+      // Paperclip may return 500 after the write succeeds (phantom 500).
+      // Check if the issue was actually created before treating as failure.
+      const isPaperclip500 = err instanceof PaperclipApiError && err.statusCode === 500;
+
+      if (isPaperclip500) {
+        try {
+          // Sub-issues are intentionally created WITHOUT parentId (to avoid the
+          // Paperclip execution-lock 500). The parentId is linked via updateIssue
+          // after creation. If the phantom 500 fired during createIssue, the
+          // issue exists but has no parentId — querying by parentId won't find it.
+          // Instead, match on metadata.parentIssueId which IS set at creation time.
+          const candidates = await client.listIssues(
+            assigneeId ? { assigneeAgentId: assigneeId } : undefined,
+          );
+          const phantom = candidates.find(
+            (c) =>
+              c.title === task.title &&
+              c.status !== "cancelled" &&
+              (c.metadata as Record<string, unknown> | undefined)?.parentIssueId === issue.id,
+          );
+          if (phantom) {
+            log.warn("Phantom 500 — sub-issue was actually created", {
+              subIssueId: phantom.id,
+              title: task.title,
+            });
+            // Link to parent now (deferred from the failed createIssue flow)
+            try {
+              await client.updateIssue(phantom.id, { parentId: issue.id });
+            } catch {
+              // Non-critical — metadata already records the relationship
+            }
+            createdIssueIds.push(phantom.id);
+            subtasksCreated++;
+            continue; // Don't report as error
+          }
+        } catch {
+          // If we can't check, fall through to error reporting
+        }
+      }
+
       log.error("Failed to create sub-issue", {
         title: task.title,
         assignTo: task.assignTo,
@@ -469,10 +523,14 @@ export async function orchestrateCeoIssue(
       });
 
       // Report the failure but continue with remaining tasks
-      await client.addIssueComment(
-        issue.id,
-        `⚠️ **CEO** — Failed to create sub-task "${task.title}": ${err instanceof Error ? err.message : String(err)}`,
-      );
+      try {
+        await client.addIssueComment(
+          issue.id,
+          `⚠️ **CEO** — Failed to create sub-task "${task.title}": ${err instanceof Error ? err.message : String(err)}`,
+        );
+      } catch {
+        // Comment may also 500 — don't cascade errors
+      }
     }
   }
 

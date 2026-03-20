@@ -35,13 +35,42 @@ const log = Logger.child("agent-dispatcher");
 
 /**
  * Work item lifecycle phases.
+ *
+ * Original 5 phases cover the core BMAD story lifecycle. The expanded
+ * phases align with the CEO's delegation pipeline (research → define →
+ * plan → execute → review) and map to specific BMAD agent capabilities.
+ *
+ * The "delegated-task" phase is a catch-all for CEO-delegated work where
+ * the issue title and description ARE the prompt — no rigid template needed.
  */
 export type WorkPhase =
+  // ── Core story lifecycle (original) ───────────────────────────────
   | "create-story"
   | "dev-story"
   | "code-review"
   | "sprint-planning"
-  | "sprint-status";
+  | "sprint-status"
+  // ── Research phase ────────────────────────────────────────────────
+  | "research"
+  | "domain-research"
+  | "market-research"
+  | "technical-research"
+  // ── Define phase ──────────────────────────────────────────────────
+  | "create-prd"
+  | "create-architecture"
+  | "create-ux-design"
+  | "create-product-brief"
+  // ── Plan phase ────────────────────────────────────────────────────
+  | "create-epics"
+  | "check-implementation-readiness"
+  // ── Execute phase (extensions) ────────────────────────────────────
+  | "e2e-tests"
+  | "documentation"
+  | "quick-dev"
+  // ── Review phase (extensions) ─────────────────────────────────────
+  | "editorial-review"
+  // ── Generic delegated work ────────────────────────────────────────
+  | "delegated-task";
 
 /**
  * A work item to dispatch to an agent.
@@ -63,6 +92,12 @@ export interface WorkItem {
   extraContext?: string;
   /** Complexity signals for model tier selection */
   complexitySignals?: ComplexitySignals;
+  /**
+   * Override the default agent from getPhaseConfig().
+   * Used when the CEO explicitly assigned a task to a specific BMAD agent
+   * that differs from the phase's default routing.
+   */
+  agentOverride?: string;
 }
 
 /**
@@ -92,9 +127,37 @@ interface PhaseConfig {
 
 /**
  * Phase routing table — maps lifecycle phases to agents, tools, and prompts.
+ *
+ * Two categories of prompts:
+ * 1. **Template prompts** — Original 5 phases with rigid tool-specific instructions
+ * 2. **Context prompts** — Expanded phases that use the issue description as primary
+ *    instruction, since the CEO already wrote detailed, self-contained task descriptions
  */
 function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
+  /**
+   * Helper: build a context-driven prompt for CEO-delegated tasks.
+   * Uses the issue title + description as the primary instruction rather
+   * than a rigid template. The agent's BMAD skills (loaded via skillDirectories)
+   * provide the methodology context.
+   */
+  const contextPrompt = (agentMention: string, phaseName: string) =>
+    (item: WorkItem, _config: BmadConfig): string => [
+      `@${agentMention} You have been assigned the following ${phaseName} task:`,
+      ``,
+      `## Task: ${item.storyTitle ?? "Untitled"}`,
+      ``,
+      item.storyDescription ?? "No description provided.",
+      ``,
+      `Use your BMAD skills and tools to complete this task thoroughly.`,
+      `When finished, provide a comprehensive summary of your work and any artifacts produced.`,
+      item.extraContext ? `\n## Additional Context\n${item.extraContext}` : "",
+    ].filter(Boolean).join("\n");
+
   return {
+    // ═══════════════════════════════════════════════════════════════════
+    // Core Story Lifecycle (original 5 phases — template prompts)
+    // ═══════════════════════════════════════════════════════════════════
+
     "create-story": {
       agentName: "bmad-pm",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -173,6 +236,145 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
         `Provide a brief summary of the sprint state.`,
       ].join("\n"),
     },
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Research Phase — Analyst, PM, or Architect investigate
+    // ═══════════════════════════════════════════════════════════════════
+
+    "research": {
+      agentName: "bmad-analyst",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [sprintStatusTool] as Tool<any>[],
+      buildPrompt: contextPrompt("bmad-analyst", "research"),
+    },
+
+    "domain-research": {
+      agentName: "bmad-analyst",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [sprintStatusTool] as Tool<any>[],
+      buildPrompt: contextPrompt("bmad-analyst", "domain research"),
+    },
+
+    "market-research": {
+      agentName: "bmad-pm",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [sprintStatusTool] as Tool<any>[],
+      buildPrompt: contextPrompt("bmad-pm", "market research"),
+    },
+
+    "technical-research": {
+      agentName: "bmad-architect",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [sprintStatusTool] as Tool<any>[],
+      buildPrompt: contextPrompt("bmad-architect", "technical research"),
+    },
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Define Phase — PM, Architect, UX create specs
+    // ═══════════════════════════════════════════════════════════════════
+
+    "create-prd": {
+      agentName: "bmad-pm",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [sprintStatusTool] as Tool<any>[],
+      buildPrompt: contextPrompt("bmad-pm", "PRD creation"),
+    },
+
+    "create-architecture": {
+      agentName: "bmad-architect",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [sprintStatusTool] as Tool<any>[],
+      buildPrompt: contextPrompt("bmad-architect", "architecture design"),
+    },
+
+    "create-ux-design": {
+      agentName: "bmad-ux-designer",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [sprintStatusTool] as Tool<any>[],
+      buildPrompt: contextPrompt("bmad-ux-designer", "UX design"),
+    },
+
+    "create-product-brief": {
+      agentName: "bmad-pm",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [sprintStatusTool] as Tool<any>[],
+      buildPrompt: contextPrompt("bmad-pm", "product brief creation"),
+    },
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Plan Phase — SM & PM break down into stories/epics
+    // ═══════════════════════════════════════════════════════════════════
+
+    "create-epics": {
+      agentName: "bmad-pm",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [createStoryTool, sprintStatusTool] as Tool<any>[],
+      buildPrompt: contextPrompt("bmad-pm", "epic and story creation"),
+    },
+
+    "check-implementation-readiness": {
+      agentName: "bmad-pm",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [sprintStatusTool] as Tool<any>[],
+      buildPrompt: contextPrompt("bmad-pm", "implementation readiness check"),
+    },
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Execute Phase Extensions — Dev, QA, Tech Writer
+    // ═══════════════════════════════════════════════════════════════════
+
+    "e2e-tests": {
+      agentName: "bmad-qa",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [codeReviewTool, qualityGateEvaluateTool, sprintStatusTool] as Tool<any>[],
+      buildPrompt: contextPrompt("bmad-qa", "end-to-end test generation"),
+    },
+
+    "documentation": {
+      agentName: "bmad-tech-writer",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [sprintStatusTool] as Tool<any>[],
+      buildPrompt: contextPrompt("bmad-tech-writer", "documentation"),
+    },
+
+    "quick-dev": {
+      agentName: "bmad-quick-flow-solo-dev",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [devStoryTool, createStoryTool, codeReviewTool, sprintStatusTool] as Tool<any>[],
+      buildPrompt: contextPrompt("bmad-quick-flow-solo-dev", "quick development"),
+    },
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Review Phase Extensions
+    // ═══════════════════════════════════════════════════════════════════
+
+    "editorial-review": {
+      agentName: "bmad-tech-writer",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [sprintStatusTool] as Tool<any>[],
+      buildPrompt: contextPrompt("bmad-tech-writer", "editorial review"),
+    },
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Generic Delegated Task — CEO-assigned work with full context
+    // ═══════════════════════════════════════════════════════════════════
+
+    "delegated-task": {
+      agentName: "bmad-dev", // Default — will be overridden by dispatchDelegated()
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: allTools as Tool<any>[],
+      buildPrompt: (item, _config) => [
+        `You have been assigned the following task by the CEO:`,
+        ``,
+        `## ${item.storyTitle ?? "Delegated Task"}`,
+        ``,
+        item.storyDescription ?? "No description provided.",
+        ``,
+        `Complete this task using all available tools and skills.`,
+        `Provide a thorough summary of work done when complete.`,
+        item.extraContext ? `\n## Additional Context\n${item.extraContext}` : "",
+      ].filter(Boolean).join("\n"),
+    },
   };
 }
 
@@ -218,15 +420,16 @@ export class AgentDispatcher {
       };
     }
 
-    // Resolve the agent
-    const agent = getAgent(phaseConfig.agentName);
+    // Resolve the agent — agentOverride takes precedence (CEO-delegated tasks)
+    const targetAgentName = item.agentOverride ?? phaseConfig.agentName;
+    const agent = getAgent(targetAgentName);
     if (!agent) {
       return {
         success: false,
         response: "",
-        agentName: phaseConfig.agentName,
+        agentName: targetAgentName,
         sessionId: "",
-        error: `Agent not found: ${phaseConfig.agentName}`,
+        error: `Agent not found: ${targetAgentName}`,
       };
     }
 

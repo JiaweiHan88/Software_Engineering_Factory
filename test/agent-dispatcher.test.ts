@@ -141,6 +141,132 @@ describe("AgentDispatcher", () => {
       expect(result.success).toBe(true);
       expect(result.agentName).toBe("bmad-sm");
     });
+
+    // ── Research phase routing ────────────────────────────────────────
+    it("routes research to bmad-analyst", async () => {
+      const item: WorkItem = { id: "w-6", phase: "research", storyTitle: "Research APIs" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-analyst");
+    });
+
+    it("routes domain-research to bmad-analyst", async () => {
+      const item: WorkItem = { id: "w-7", phase: "domain-research", storyTitle: "Study domain" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-analyst");
+    });
+
+    it("routes market-research to bmad-pm", async () => {
+      const item: WorkItem = { id: "w-8", phase: "market-research", storyTitle: "Market study" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-pm");
+    });
+
+    it("routes technical-research to bmad-architect", async () => {
+      const item: WorkItem = { id: "w-9", phase: "technical-research", storyTitle: "Tech eval" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-architect");
+    });
+
+    // ── Define phase routing ──────────────────────────────────────────
+    it("routes create-prd to bmad-pm", async () => {
+      const item: WorkItem = { id: "w-10", phase: "create-prd", storyTitle: "Write PRD" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-pm");
+    });
+
+    it("routes create-architecture to bmad-architect", async () => {
+      const item: WorkItem = { id: "w-11", phase: "create-architecture", storyTitle: "Design arch" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-architect");
+    });
+
+    it("routes create-ux-design to bmad-ux-designer", async () => {
+      const item: WorkItem = { id: "w-12", phase: "create-ux-design", storyTitle: "Design UI" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-ux-designer");
+    });
+
+    it("routes create-product-brief to bmad-pm", async () => {
+      const item: WorkItem = { id: "w-13", phase: "create-product-brief", storyTitle: "Brief" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-pm");
+    });
+
+    // ── Plan phase routing ────────────────────────────────────────────
+    it("routes create-epics to bmad-pm", async () => {
+      const item: WorkItem = { id: "w-14", phase: "create-epics", storyTitle: "Create epics" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-pm");
+    });
+
+    it("routes check-implementation-readiness to bmad-pm", async () => {
+      const item: WorkItem = { id: "w-15", phase: "check-implementation-readiness", storyTitle: "Check" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-pm");
+    });
+
+    // ── Execute phase extensions ──────────────────────────────────────
+    it("routes e2e-tests to bmad-qa", async () => {
+      const item: WorkItem = { id: "w-16", phase: "e2e-tests", storyTitle: "E2E tests" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-qa");
+    });
+
+    it("routes documentation to bmad-tech-writer", async () => {
+      const item: WorkItem = { id: "w-17", phase: "documentation", storyTitle: "Write docs" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-tech-writer");
+    });
+
+    it("routes quick-dev to bmad-quick-flow-solo-dev", async () => {
+      const item: WorkItem = { id: "w-18", phase: "quick-dev", storyTitle: "Quick task" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-quick-flow-solo-dev");
+    });
+
+    // ── Review phase extensions ───────────────────────────────────────
+    it("routes editorial-review to bmad-tech-writer", async () => {
+      const item: WorkItem = { id: "w-19", phase: "editorial-review", storyTitle: "Review prose" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-tech-writer");
+    });
+
+    // ── Generic delegated task ────────────────────────────────────────
+    it("routes delegated-task to bmad-dev by default", async () => {
+      const item: WorkItem = { id: "w-20", phase: "delegated-task", storyTitle: "CEO task" };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-dev");
+    });
   });
 
   describe("dispatch flow", () => {
@@ -234,6 +360,68 @@ describe("AgentDispatcher", () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain("Timeout");
+    });
+  });
+
+  describe("agentOverride", () => {
+    it("uses agentOverride instead of phase default when provided", async () => {
+      const item: WorkItem = {
+        id: "w-1",
+        phase: "research",
+        storyTitle: "Research APIs",
+        agentOverride: "bmad-architect",
+      };
+      const result = await dispatcher.dispatch(item);
+
+      // Phase default is bmad-analyst, but override says bmad-architect
+      expect(result.success).toBe(true);
+      expect(result.agentName).toBe("bmad-architect");
+    });
+
+    it("returns error when agentOverride points to unknown agent", async () => {
+      const item: WorkItem = {
+        id: "w-1",
+        phase: "research",
+        storyTitle: "Research",
+        agentOverride: "bmad-nonexistent",
+      };
+      const result = await dispatcher.dispatch(item);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Agent not found: bmad-nonexistent");
+    });
+  });
+
+  describe("context-driven prompts", () => {
+    it("uses issue title and description in expanded phase prompts", async () => {
+      const item: WorkItem = {
+        id: "w-1",
+        phase: "create-architecture",
+        storyTitle: "Design microservice architecture",
+        storyDescription: "Create a scalable architecture for the payment service.",
+      };
+      await dispatcher.dispatch(item);
+
+      const sendCall = (mockMgr.sendAndWait as ReturnType<typeof vi.fn>).mock.calls[0];
+      const prompt = sendCall[1] as string;
+      expect(prompt).toContain("Design microservice architecture");
+      expect(prompt).toContain("Create a scalable architecture for the payment service.");
+      expect(prompt).toContain("@bmad-architect");
+    });
+
+    it("includes extra context in expanded phase prompts", async () => {
+      const item: WorkItem = {
+        id: "w-1",
+        phase: "documentation",
+        storyTitle: "Write API docs",
+        storyDescription: "Document the REST API endpoints.",
+        extraContext: "Use OpenAPI 3.0 format.",
+      };
+      await dispatcher.dispatch(item);
+
+      const sendCall = (mockMgr.sendAndWait as ReturnType<typeof vi.fn>).mock.calls[0];
+      const prompt = sendCall[1] as string;
+      expect(prompt).toContain("Use OpenAPI 3.0 format.");
     });
   });
 

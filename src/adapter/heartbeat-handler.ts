@@ -35,6 +35,8 @@ export interface HeartbeatContext {
     description: string;
     storyId?: string;
     phase?: WorkPhase;
+    /** Issue metadata (may contain bmadPhase from CEO delegation) */
+    metadata?: Record<string, unknown>;
   };
   /** Additional context from Paperclip */
   metadata?: Record<string, unknown>;
@@ -75,7 +77,10 @@ export async function handleHeartbeat(
   }
 
   // 3. Determine the BMAD workflow phase
-  const phase = ctx.issue.phase ?? inferPhaseFromRole(ctx.bmadRole);
+  //    Priority: explicit issue.phase → metadata.bmadPhase → role-based inference
+  const phase = ctx.issue.phase
+    ?? resolvePhaseFromMetadata(ctx.issue.metadata)
+    ?? inferPhaseFromRole(ctx.bmadRole);
 
   log.info("Processing heartbeat", {
     agent: agent.displayName,
@@ -141,6 +146,7 @@ export async function handlePaperclipIssue(
       description: issue.description,
       storyId: issue.storyId,
       phase: issue.phase as WorkPhase | undefined,
+      metadata: issue.metadata,
     },
   };
 
@@ -154,21 +160,87 @@ export async function handlePaperclipIssue(
 }
 
 /**
+ * Resolve WorkPhase from issue metadata (set by CEO delegation).
+ *
+ * The CEO orchestrator sets `metadata.bmadPhase` on sub-issues when delegating.
+ * This maps the CEO's pipeline phase (research/define/plan/execute/review) to
+ * a specific WorkPhase. If the metadata also contains a more specific phase
+ * hint, that takes priority.
+ *
+ * @returns WorkPhase if resolvable from metadata, undefined otherwise
+ */
+function resolvePhaseFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+): WorkPhase | undefined {
+  if (!metadata) return undefined;
+
+  // Check for explicit WorkPhase set by CEO or other code
+  const explicitPhase = metadata.workPhase as string | undefined;
+  if (explicitPhase && isValidWorkPhase(explicitPhase)) {
+    return explicitPhase as WorkPhase;
+  }
+
+  // Map CEO pipeline phase to a default WorkPhase
+  const bmadPhase = metadata.bmadPhase as string | undefined;
+  if (!bmadPhase) return undefined;
+
+  const phaseMap: Record<string, WorkPhase> = {
+    research: "research",
+    define: "create-prd",
+    plan: "sprint-planning",
+    execute: "dev-story",
+    review: "code-review",
+  };
+
+  return phaseMap[bmadPhase];
+}
+
+/**
+ * All valid WorkPhase values.
+ */
+const VALID_WORK_PHASES = new Set<string>([
+  "create-story", "dev-story", "code-review", "sprint-planning", "sprint-status",
+  "research", "domain-research", "market-research", "technical-research",
+  "create-prd", "create-architecture", "create-ux-design", "create-product-brief",
+  "create-epics", "check-implementation-readiness",
+  "e2e-tests", "documentation", "quick-dev",
+  "editorial-review", "delegated-task",
+]);
+
+/**
+ * Type guard: is this string a valid WorkPhase?
+ */
+function isValidWorkPhase(phase: string): phase is WorkPhase {
+  return VALID_WORK_PHASES.has(phase);
+}
+
+/**
  * Infer the BMAD phase from agent role when not explicitly provided.
+ *
+ * Expanded to handle all BMAD roles with reasonable defaults.
+ * Used as last-resort when neither issue.phase nor metadata.bmadPhase is set.
  */
 function inferPhaseFromRole(role: string): WorkPhase {
   switch (role) {
     case "bmad-pm":
-    case "bmad-analyst":
       return "create-story";
+    case "bmad-analyst":
+      return "research";
     case "bmad-dev":
-    case "bmad-quick-flow-solo-dev":
       return "dev-story";
     case "bmad-qa":
       return "code-review";
     case "bmad-sm":
       return "sprint-planning";
+    case "bmad-architect":
+      return "create-architecture";
+    case "bmad-ux-designer":
+      return "create-ux-design";
+    case "bmad-tech-writer":
+      return "documentation";
+    case "bmad-quick-flow-solo-dev":
+      return "quick-dev";
     default:
-      return "sprint-status";
+      return "delegated-task";
   }
 }

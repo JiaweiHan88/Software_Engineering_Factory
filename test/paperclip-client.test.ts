@@ -124,9 +124,6 @@ describe("PaperclipClient", () => {
       const result = await client.createAgent({
         name: "BMAD Developer",
         title: "Developer",
-        companyId: "bmad-factory",
-        status: "active",
-        heartbeatEnabled: true,
       });
 
       expect(result.id).toBe("agent-1");

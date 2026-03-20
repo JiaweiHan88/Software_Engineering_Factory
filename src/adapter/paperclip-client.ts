@@ -104,6 +104,31 @@ export interface PaperclipGoal {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * Paperclip cost event — POST /api/companies/:companyId/cost-events.
+ *
+ * Feeds the native Paperclip cost dashboard, budget tracking, and
+ * per-agent/per-model spend analytics.
+ */
+export interface PaperclipCostEvent {
+  agentId: string;
+  issueId?: string | null;
+  projectId?: string | null;
+  goalId?: string | null;
+  heartbeatRunId?: string | null;
+  provider: string;
+  biller?: string;
+  billingType?: "metered_api" | "subscription_included" | "subscription_overage" | "credits" | "fixed" | "unknown";
+  model: string;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  /** Cost in integer cents (e.g., $0.0042 → 0, $0.05 → 5, $1.23 → 123) */
+  costCents: number;
+  /** ISO 8601 datetime string */
+  occurredAt: string;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // API Error
 // ─────────────────────────────────────────────────────────────────────────────
@@ -524,6 +549,23 @@ export class PaperclipClient {
       "POST",
       `/api/issues/${issueId}/comments`,
       { body },
+    );
+  }
+
+  // ── Cost Reporting ────────────────────────────────────────────────────
+
+  /**
+   * Report a cost event to Paperclip's native cost tracking system.
+   * Real endpoint: POST /api/companies/:companyId/cost-events
+   *
+   * This feeds the /costs dashboard, budget enforcement, and per-agent/model
+   * spend analytics. Each LLM interaction should be reported as one event.
+   */
+  async reportCostEvent(event: PaperclipCostEvent): Promise<{ id: string }> {
+    return this.request<{ id: string }>(
+      "POST",
+      `/api/companies/${this.companyId}/cost-events`,
+      event,
     );
   }
 

@@ -28,7 +28,10 @@
     "typecheck": "tsc --noEmit",
     "e2e:smoke": "tsx scripts/e2e-smoke.ts",
     "e2e:smoke:ceo": "tsx scripts/e2e-smoke.ts --ceo-only --skip-cleanup --verbose",
-    "e2e:smoke:verbose": "tsx scripts/e2e-smoke.ts --skip-cleanup --verbose"
+    "e2e:smoke:verbose": "tsx scripts/e2e-smoke.ts --skip-cleanup --verbose",
+    "e2e:invoke": "tsx scripts/e2e-smoke-invoke.ts",
+    "e2e:invoke:ceo": "tsx scripts/e2e-smoke-invoke.ts --ceo-only --skip-cleanup --verbose",
+    "e2e:invoke:verbose": "tsx scripts/e2e-smoke-invoke.ts --skip-cleanup --verbose"
   },
   "dependencies": {
     "@github/copilot-sdk": "^0.1.32",

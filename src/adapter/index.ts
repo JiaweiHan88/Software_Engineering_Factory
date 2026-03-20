@@ -40,6 +40,9 @@ export type {
 export { PaperclipReporter } from "./reporter.js";
 export type { ReportLogEntry } from "./reporter.js";
 
+export { withRetry, isPaperclipRetryable } from "./retry.js";
+export type { RetryOptions, RetryResult } from "./retry.js";
+
 export { PaperclipLoop } from "./paperclip-loop.js";
 export type {
   PaperclipLoopEvent,

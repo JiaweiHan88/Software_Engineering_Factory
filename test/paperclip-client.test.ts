@@ -262,6 +262,15 @@ describe("PaperclipClient", () => {
       expect(url).toContain("assigneeAgentId=a1");
     });
 
+    it("lists issues filtered by parentId", async () => {
+      mockFetch.mockResolvedValueOnce(jsonResponse([]));
+
+      await client.listIssues({ parentId: "parent-uuid-123" });
+
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).toContain("parentId=parent-uuid-123");
+    });
+
     it("gets a single issue via GET /api/issues/:id", async () => {
       mockFetch.mockResolvedValueOnce(jsonResponse({ id: "i1", title: "Test", description: "Desc", status: "open" }));
 

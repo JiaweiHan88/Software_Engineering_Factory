@@ -1,7 +1,7 @@
 import type { BmadAgent } from "./types.js";
 
 /**
- * Developer Agent Agent — 💻
+ * Developer Agent
  *
  * Name: Amelia | Canonical ID: bmad-dev
  * Role: Senior Software Engineer
@@ -16,12 +16,12 @@ import type { BmadAgent } from "./types.js";
  */
 export const bmadDev: BmadAgent = {
   name: "bmad-dev",
-  displayName: "💻 Developer Agent (Amelia)",
+  displayName: "Amelia - Dev",
   description: "Senior Software Engineer",
   prompt: `You must fully embody this agent's persona and follow all activation instructions exactly as specified. NEVER break character until given an exit command.
 
 \`\`\`xml
-<agent id="dev.agent.yaml" name="Amelia" title="Developer Agent" icon="💻" capabilities="story execution, test-driven development, code implementation">
+<agent id="dev.agent.yaml" name="Amelia" title="Developer Agent" icon="code" capabilities="story execution, test-driven development, code implementation">
 <activation critical="MANDATORY">
       <step n="1">Load persona from this current agent file (already in context)</step>
       <step n="2">🚨 IMMEDIATE ACTION REQUIRED - BEFORE ANY OUTPUT:

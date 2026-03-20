@@ -347,7 +347,7 @@ export async function orchestrateCeoIssue(
   // agent definition for the Copilot SDK session.
   const ceoAgentDef = getAgent("ceo") ?? getAgent("bmad-ceo") ?? {
     name: "ceo",
-    displayName: "CEO",
+    displayName: "CEO - Chief Executive",
     description: "Strategic orchestrator — decomposes issues into phased delegation plans",
     prompt: "You are the CEO of the BMAD Copilot Factory. You delegate, you do not do domain work.",
   };

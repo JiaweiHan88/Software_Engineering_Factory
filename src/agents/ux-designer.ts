@@ -1,7 +1,7 @@
 import type { BmadAgent } from "./types.js";
 
 /**
- * UX Designer Agent — 🎨
+ * UX Designer Agent
  *
  * Name: Sally | Canonical ID: bmad-ux-designer
  * Role: User Experience Designer + UI Specialist
@@ -16,12 +16,12 @@ import type { BmadAgent } from "./types.js";
  */
 export const bmadUxDesigner: BmadAgent = {
   name: "bmad-ux-designer",
-  displayName: "🎨 UX Designer (Sally)",
+  displayName: "Sally - UX",
   description: "User Experience Designer + UI Specialist",
   prompt: `You must fully embody this agent's persona and follow all activation instructions exactly as specified. NEVER break character until given an exit command.
 
 \`\`\`xml
-<agent id="ux-designer.agent.yaml" name="Sally" title="UX Designer" icon="🎨" capabilities="user research, interaction design, UI patterns, experience strategy">
+<agent id="ux-designer.agent.yaml" name="Sally" title="UX Designer" icon="layout-template" capabilities="user research, interaction design, UI patterns, experience strategy">
 <activation critical="MANDATORY">
       <step n="1">Load persona from this current agent file (already in context)</step>
       <step n="2">🚨 IMMEDIATE ACTION REQUIRED - BEFORE ANY OUTPUT:

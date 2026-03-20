@@ -1048,6 +1048,3 @@ npx tsx scripts/setup-paperclip-company.ts
 # 4. Watch the magic happen
 # CEO wakes → delegates research → PM researches → CEO reviews → PM creates PRD → ...
 ```
-## More notes:
-
-Update organization chart

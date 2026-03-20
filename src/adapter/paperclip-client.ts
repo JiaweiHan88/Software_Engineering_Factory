@@ -137,6 +137,12 @@ export interface PaperclipClientOptions {
   companyId?: string;
   /** Request timeout in milliseconds (default 10_000) */
   timeoutMs?: number;
+  /**
+   * Heartbeat run ID — sent as X-Paperclip-Run-Id header.
+   * Required by Paperclip when using agent API key auth to post comments
+   * and perform other agent-scoped write operations.
+   */
+  heartbeatRunId?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -171,6 +177,7 @@ export class PaperclipClient {
   private agentApiKey?: string;
   private companyId: string;
   private timeoutMs: number;
+  private heartbeatRunId?: string;
 
   constructor(opts: PaperclipClientOptions) {
     // Strip trailing slash
@@ -178,6 +185,7 @@ export class PaperclipClient {
     this.agentApiKey = opts.agentApiKey;
     this.companyId = opts.companyId ?? "default";
     this.timeoutMs = opts.timeoutMs ?? 10_000;
+    this.heartbeatRunId = opts.heartbeatRunId;
   }
 
   // ── Internal HTTP helpers ─────────────────────────────────────────────
@@ -186,7 +194,7 @@ export class PaperclipClient {
    * Build standard headers for Paperclip API requests.
    *
    * Real Paperclip uses Bearer token auth (agent API keys).
-   * No custom headers like X-Paperclip-Org — company scoping is in the URL path.
+   * X-Paperclip-Run-Id is required for agent write operations (comments, etc.).
    */
   private headers(): Record<string, string> {
     const h: Record<string, string> = {
@@ -196,47 +204,78 @@ export class PaperclipClient {
     if (this.agentApiKey) {
       h["Authorization"] = `Bearer ${this.agentApiKey}`;
     }
+    if (this.heartbeatRunId) {
+      h["X-Paperclip-Run-Id"] = this.heartbeatRunId;
+    }
     return h;
   }
 
   /**
-   * Generic fetch wrapper with timeout and error handling.
+   * Generic fetch wrapper with timeout, retries for transient errors, and error handling.
+   *
+   * Retries up to 2 times on 500 (Internal Server Error) with a 1s delay,
+   * but ONLY for idempotent methods (GET, DELETE). POST/PATCH/PUT are NOT
+   * retried because Paperclip may return 500 after the write succeeds
+   * (e.g., a post-commit hook fails), and retrying would create duplicates.
    */
   private async request<T>(
     method: string,
     path: string,
     body?: unknown,
   ): Promise<T> {
-    const url = `${this.baseUrl}${path}`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const isIdempotent = method === "GET" || method === "DELETE";
+    const maxRetries = isIdempotent ? 2 : 0;
+    let lastError: PaperclipApiError | undefined;
 
-    try {
-      const res = await fetch(url, {
-        method,
-        headers: this.headers(),
-        body: body ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new PaperclipApiError(res.status, `${method} ${path}`, text);
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, 1000));
       }
 
-      // 204 No Content
-      if (res.status === 204) return undefined as T;
+      const url = `${this.baseUrl}${path}`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 
-      return (await res.json()) as T;
-    } catch (err) {
-      if (err instanceof PaperclipApiError) throw err;
-      if ((err as Error).name === "AbortError") {
-        throw new PaperclipApiError(408, `${method} ${path}`, `Request timed out after ${this.timeoutMs}ms`);
+      try {
+        const res = await fetch(url, {
+          method,
+          headers: this.headers(),
+          body: body ? JSON.stringify(body) : undefined,
+          signal: controller.signal,
+        });
+
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          const err = new PaperclipApiError(res.status, `${method} ${path}`, text);
+
+          if (res.status === 500 && attempt < maxRetries) {
+            lastError = err;
+            continue;
+          }
+          throw err;
+        }
+
+        if (res.status === 204) return undefined as T;
+
+        return (await res.json()) as T;
+      } catch (err) {
+        if (err instanceof PaperclipApiError) {
+          if (err.statusCode === 500 && attempt < maxRetries) {
+            lastError = err;
+            continue;
+          }
+          throw err;
+        }
+        if ((err as Error).name === "AbortError") {
+          throw new PaperclipApiError(408, `${method} ${path}`, `Request timed out after ${this.timeoutMs}ms`);
+        }
+        throw err;
+      } finally {
+        clearTimeout(timer);
       }
-      throw err;
-    } finally {
-      clearTimeout(timer);
     }
+
+    throw lastError ?? new PaperclipApiError(500, `${method} ${path}`, "All retries exhausted");
   }
 
   // ── Agent Management ──────────────────────────────────────────────────
@@ -464,7 +503,7 @@ export class PaperclipClient {
    */
   async updateIssue(
     issueId: string,
-    updates: Partial<Pick<PaperclipIssue, "title" | "description" | "status" | "assigneeAgentId" | "priority" | "labels" | "metadata">>,
+    updates: Partial<Pick<PaperclipIssue, "title" | "description" | "status" | "assigneeAgentId" | "priority" | "labels" | "metadata" | "parentId">>,
   ): Promise<PaperclipIssue> {
     return this.request<PaperclipIssue>(
       "PATCH",

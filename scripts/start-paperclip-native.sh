@@ -7,8 +7,9 @@
 # container can't reach host binaries. This script:
 #
 # 1. Ensures Docker Postgres is running (with port 5432 exposed)
-# 2. Starts Paperclip server natively in local_trusted mode
-# 3. Process adapter commands execute directly on the host
+# 2. Kills any existing Paperclip server on port 3100
+# 3. Starts Paperclip server natively in local_trusted mode
+# 4. Process adapter commands execute directly on the host
 #
 # Prerequisites:
 #   - Docker running (for Postgres)
@@ -56,11 +57,27 @@ if docker ps -q -f name=bmad_copilot_rt-paperclip-1 | grep -q .; then
   docker stop bmad_copilot_rt-paperclip-1 2>/dev/null || true
 fi
 
-# ── Check if port 3100 is already in use ──────────────────────────────────
+# ── Kill existing native Paperclip server on port 3100 ────────────────────
 if lsof -i :3100 -P -n 2>/dev/null | grep -q LISTEN; then
-  echo "⚠️  Port 3100 is already in use — Paperclip may already be running"
-  echo "   $(lsof -i :3100 -P -n 2>/dev/null | grep LISTEN | head -1)"
-  exit 0
+  echo "🛑 Stopping existing Paperclip server on port 3100..."
+  PIDS=$(lsof -ti :3100 -sTCP:LISTEN 2>/dev/null || true)
+  if [ -n "$PIDS" ]; then
+    echo "   Killing PID(s): $PIDS"
+    echo "$PIDS" | xargs kill -TERM 2>/dev/null || true
+    # Wait up to 5 seconds for graceful shutdown
+    for i in $(seq 1 10); do
+      if ! lsof -i :3100 -P -n 2>/dev/null | grep -q LISTEN; then
+        echo "   ✅ Previous server stopped"
+        break
+      fi
+      if [ "$i" -eq 10 ]; then
+        echo "   ⚠️  Graceful shutdown timed out, force killing..."
+        echo "$PIDS" | xargs kill -9 2>/dev/null || true
+        sleep 1
+      fi
+      sleep 0.5
+    done
+  fi
 fi
 
 # ── Environment ───────────────────────────────────────────────────────────

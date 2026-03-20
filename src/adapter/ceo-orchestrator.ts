@@ -317,6 +317,20 @@ export async function orchestrateCeoIssue(
     title: issue.title,
   });
 
+  // Mark the parent issue as in_progress — CEO is actively working on delegation.
+  // This prevents the CEO from re-processing the same issue on subsequent heartbeats
+  // (the inbox filter skips in_progress issues for orchestrators).
+  try {
+    await client.updateIssue(issue.id, { status: "in_progress" });
+  } catch {
+    // Non-critical — issue may already be in_progress or the update may fail
+    // due to activity_log FK constraints. The inbox filter will still work
+    // because the issue status is checked after fetching.
+    log.warn("Could not set parent issue to in_progress (non-critical)", {
+      issueId: issue.id,
+    });
+  }
+
   // ── 1. Get agent roster for delegation targets ──────────────────────
   let agentRoster: PaperclipAgent[];
   try {

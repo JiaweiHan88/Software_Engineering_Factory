@@ -418,7 +418,8 @@ describe("PaperclipClient", () => {
     });
 
     it("PaperclipApiError has status code and endpoint", async () => {
-      mockFetch.mockResolvedValueOnce(errorResponse(500, "Internal Server Error"));
+      // Provide 500 response for all retry attempts (original + 2 retries)
+      mockFetch.mockResolvedValue(errorResponse(500, "Internal Server Error"));
 
       try {
         await client.listAgents();

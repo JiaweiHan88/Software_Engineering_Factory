@@ -58,3 +58,7 @@ export type {
   StallEventHandler,
   StallDetectorConfig,
 } from "./stall-detector.js";
+
+// Cost Tracker
+export { CostTracker } from "./cost-tracker.js";
+export type { UsageRecord, UsageSummary } from "./cost-tracker.js";

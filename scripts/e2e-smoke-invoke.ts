@@ -11,6 +11,13 @@
  * - Workspace resolution uses Paperclip's project → workspace → agent-home chain
  * - No manual env var surgery (no PAPERCLIP_HEARTBEAT_RUN_ID workaround)
  *
+ * Heartbeat Model:
+ * - CEO has timer-based heartbeat (enabled=true, intervalSec=300) for periodic oversight
+ * - All specialists are demand-only (enabled=false, wakeOnDemand=true)
+ * - Specialists only run when: (a) an issue is assigned to them, or (b) /invoke is called
+ * - This E2E pauses all agents before creating issues, then uses explicit /invoke
+ *   to control execution order deterministically
+ *
  * Prerequisites:
  * - Paperclip running at localhost:3100 (local_trusted mode)
  * - gh auth working (for Copilot SDK)
@@ -22,35 +29,24 @@
  * @module scripts/e2e-smoke-invoke
  */
 
-import "dotenv/config";
 import { mkdirSync } from "node:fs";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Configuration
-// ─────────────────────────────────────────────────────────────────────────────
-
-const PAPERCLIP_URL = process.env.PAPERCLIP_URL ?? "http://localhost:3100";
-const COMPANY_ID = process.env.PAPERCLIP_COMPANY_ID ?? "c284b9c0-bae3-4fa1-bf4c-c501d6a3967c";
-
-// Agent IDs (from Phase 1 setup)
-const AGENTS = {
-  ceo: "099b92af-01ff-41d4-ba7a-a5d959eb3880",
-  pm: "05569782-4954-49ea-b165-56e841282222",
-  architect: "88d76c6a-565f-4b4b-aed6-00cd6d66573d",
-  dev: "fe32f94b-7900-4664-9f0e-adbecdd0a204",
-  qa: "9c2a9ead-ae4b-409d-8651-ff8e1449fcf8",
-  sm: "3efab085-47dd-4fa0-a458-5fc840264f3e",
-  analyst: "114fe5f6-7891-442d-ae0d-049182c6845f",
-  ux: "3d5b8301-b41b-4471-9451-e35e97c9a5e3",
-  techWriter: "e1458467-b4ee-4264-9a53-19274af3ab83",
-  quickFlow: "8173531d-a87a-4ad9-8457-c03d7f16a3e3",
-};
+import {
+  PAPERCLIP_URL, COMPANY_ID, AGENTS,
+  paperclip, invokeHeartbeat, waitForHeartbeatRun,
+  resolveAgentIds, ensureE2eProject, setAgentTargetWorkspace,
+  pauseAllAgents, resumeAllAgents, checkPrereqs, findSubIssues,
+  log, header, sleep, setVerbose,
+  type PaperclipIssue, type PaperclipComment,
+} from "./e2e-helpers.js";
 
 const FLAGS = {
   ceoOnly: process.argv.includes("--ceo-only"),
   skipCleanup: process.argv.includes("--skip-cleanup"),
   verbose: process.argv.includes("--verbose"),
 };
+
+// Apply verbose mode to shared helpers
+setVerbose(FLAGS.verbose);
 
 /** E2E project name in Paperclip — reused across runs. */
 const E2E_PROJECT_NAME = "bmad-e2e-smoke";
@@ -62,262 +58,17 @@ let targetWorkspaceDir: string | undefined;
 let projectId: string | undefined;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface PaperclipIssue {
-  id: string;
-  title: string;
-  description: string;
-  status: string;
-  priority?: string;
-  assigneeAgentId?: string;
-  parentId?: string;
-  projectId?: string;
-  metadata?: Record<string, unknown>;
-}
-
-interface PaperclipComment {
-  id: string;
-  body: string;
-  authorId?: string;
-  createdAt?: string;
-}
-
-interface HeartbeatRun {
-  id: string;
-  agentId: string;
-  status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "timed_out";
-  startedAt: string | null;
-  finishedAt: string | null;
-  exitCode: number | null;
-  error: string | null;
-  invocationSource: string;
-  contextSnapshot?: {
-    paperclipWorkspace?: {
-      cwd?: string;
-      source?: string;
-      projectId?: string | null;
-    };
-  };
-}
-
-interface PaperclipProject {
-  id: string;
-  name: string;
-  codebase?: {
-    managedFolder?: string;
-    effectiveLocalFolder?: string;
-    localFolder?: string | null;
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Make a request to the Paperclip API.
- */
-async function paperclip<T>(
-  method: string,
-  path: string,
-  body?: unknown,
-): Promise<T> {
-  const url = `${PAPERCLIP_URL}${path}`;
-  const opts: RequestInit = {
-    method,
-    headers: { "Content-Type": "application/json" },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  };
-
-  const res = await fetch(url, opts);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Paperclip ${method} ${path} → ${res.status}: ${text}`);
-  }
-  return res.json() as Promise<T>;
-}
-
-/**
- * Invoke a heartbeat via Paperclip's native endpoint.
- *
- * POST /api/agents/:id/heartbeat/invoke → 202 (async)
- * Returns the heartbeat run immediately. Poll for completion.
- */
-async function invokeHeartbeat(agentId: string): Promise<HeartbeatRun> {
-  return paperclip<HeartbeatRun>(
-    "POST",
-    `/api/agents/${agentId}/heartbeat/invoke`,
-  );
-}
-
-/**
- * Poll for heartbeat run completion.
- * The run transitions: queued → running → succeeded/failed/timed_out
- */
-async function waitForHeartbeatRun(
-  agentId: string,
-  runId: string,
-  label: string,
-  timeoutMs = 300_000,
-  pollIntervalMs = 2_000,
-): Promise<HeartbeatRun> {
-  const deadline = Date.now() + timeoutMs;
-  const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
-  let lastStatus = "";
-
-  while (Date.now() < deadline) {
-    const runs = await paperclip<HeartbeatRun[]>(
-      "GET",
-      `/api/companies/${COMPANY_ID}/heartbeat-runs?agentId=${agentId}&limit=5`,
-    );
-
-    const run = runs.find((r) => r.id === runId);
-    if (!run) {
-      throw new Error(`Heartbeat run ${runId} not found in heartbeat-runs`);
-    }
-
-    if (run.status !== lastStatus) {
-      if (FLAGS.verbose) {
-        log("  🔄", `[${label}] status: ${run.status}`);
-      }
-      lastStatus = run.status;
-    }
-
-    if (terminalStatuses.has(run.status)) {
-      return run;
-    }
-
-    await sleep(pollIntervalMs);
-  }
-
-  throw new Error(`${label} heartbeat timed out after ${timeoutMs / 1000}s`);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function log(icon: string, msg: string, details?: Record<string, unknown>): void {
-  const detailStr = details ? ` ${JSON.stringify(details)}` : "";
-  console.log(`${icon} ${msg}${detailStr}`);
-}
-
-function header(msg: string): void {
-  console.log(`\n${"═".repeat(70)}`);
-  console.log(`  ${msg}`);
-  console.log(`${"═".repeat(70)}\n`);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Paperclip Project / Workspace Isolation
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Ensure a dedicated Paperclip project exists for E2E runs.
- * Returns the project ID and the workspace directory (managedFolder)
- * where agent-generated code should land — NOT in this repo.
- */
-async function ensureE2eProject(): Promise<{ projectId: string; workspaceDir: string }> {
-  const projects = await paperclip<PaperclipProject[]>(
-    "GET",
-    `/api/companies/${COMPANY_ID}/projects`,
-  );
-  let project = projects.find((p) => p.name === E2E_PROJECT_NAME);
-
-  if (!project) {
-    project = await paperclip<PaperclipProject>(
-      "POST",
-      `/api/companies/${COMPANY_ID}/projects`,
-      { name: E2E_PROJECT_NAME, description: "E2E smoke test workspace — auto-created" },
-    );
-    log("🆕", "Created Paperclip project", { name: project.name, id: project.id });
-  } else {
-    log("♻️ ", "Reusing Paperclip project", { name: project.name, id: project.id });
-  }
-
-  // Resolve workspace directory — Paperclip auto-creates a managedFolder
-  const wsDir = project.codebase?.effectiveLocalFolder
-    ?? project.codebase?.managedFolder;
-
-  if (!wsDir) {
-    const allProjects = await paperclip<PaperclipProject[]>(
-      "GET",
-      `/api/companies/${COMPANY_ID}/projects`,
-    );
-    const refetched = allProjects.find((p) => p.id === project!.id);
-    const dir = refetched?.codebase?.effectiveLocalFolder
-      ?? refetched?.codebase?.managedFolder;
-    if (!dir) {
-      throw new Error(
-        `Paperclip project ${project.id} has no managedFolder — ` +
-        `cannot isolate workspace. Raw codebase: ${JSON.stringify(refetched?.codebase)}`,
-      );
-    }
-    return { projectId: project.id, workspaceDir: dir };
-  }
-
-  return { projectId: project.id, workspaceDir: wsDir };
-}
-
-/**
- * Update an agent's adapter config to include TARGET_PROJECT_ROOT env var.
- * Paperclip's process adapter merges config.env into the child process env.
- */
-async function setAgentTargetWorkspace(agentId: string, wsDir: string): Promise<void> {
-  // Get current agent config
-  const agent = await paperclip<{
-    id: string;
-    adapterConfig: Record<string, unknown>;
-  }>("GET", `/api/agents/${agentId}`);
-
-  const currentEnv = (agent.adapterConfig?.env as Record<string, string>) ?? {};
-  const updatedConfig = {
-    ...agent.adapterConfig,
-    env: {
-      ...currentEnv,
-      TARGET_PROJECT_ROOT: wsDir,
-    },
-  };
-
-  await paperclip("PATCH", `/api/agents/${agentId}`, {
-    adapterConfig: updatedConfig,
-  });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // E2E Pipeline Steps
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function step1_checkPrereqs(): Promise<void> {
   header("Step 1: Verify Prerequisites");
 
-  // Check Paperclip
-  try {
-    const health = await paperclip<{ status: string }>("GET", "/api/health");
-    log("✅", "Paperclip is running", { status: health.status });
-  } catch {
-    log("❌", "Paperclip is not reachable at " + PAPERCLIP_URL);
-    process.exit(1);
-  }
-
-  // Check CEO agent exists
-  try {
-    const agent = await paperclip<{ id: string; title: string; status: string }>(
-      "GET",
-      `/api/agents/${AGENTS.ceo}`,
-    );
-    log("✅", "CEO agent found", { title: agent.title, status: agent.status });
-  } catch {
-    log("❌", "CEO agent not found — run Phase 1 setup first");
-    process.exit(1);
-  }
-
-  log("ℹ️ ", "GHE auth assumed OK (gh auth status showed logged in)");
+  // Shared checks: Paperclip health, CEO agent, heartbeat config
+  await checkPrereqs();
 
   // Set up workspace isolation
-  const e2eProject = await ensureE2eProject();
+  const e2eProject = await ensureE2eProject(E2E_PROJECT_NAME);
   projectId = e2eProject.projectId;
   targetWorkspaceDir = e2eProject.workspaceDir;
   mkdirSync(targetWorkspaceDir, { recursive: true });
@@ -386,17 +137,10 @@ async function step3_invokeCeoHeartbeat(issueId: string): Promise<void> {
   header("Step 3: Invoke CEO Heartbeat (via /invoke)");
 
   // Pause ALL agents to prevent auto-trigger when we move issue to 'todo'.
-  // With /invoke, we explicitly control when the heartbeat fires, but
-  // the status change to 'todo' could still trigger Paperclip's automation.
-  const allAgentIds = Object.entries(AGENTS);
-  for (const [, id] of allAgentIds) {
-    try {
-      await paperclip("POST", `/api/agents/${id}/pause`);
-    } catch {
-      // Agent may already be paused
-    }
-  }
-  log("⏸️ ", `Paused ${allAgentIds.length} agents (prevents auto-trigger)`);
+  // With the event-driven heartbeat model (specialists have wakeOnDemand=true),
+  // Paperclip would auto-wake agents when issues are assigned to them.
+  // Pausing prevents this — we control invocation timing explicitly via /invoke.
+  await pauseAllAgents();
 
   // Move issue to 'todo' so the CEO's inbox picks it up
   await paperclip("PATCH", `/api/issues/${issueId}`, { status: "todo" });
@@ -449,25 +193,7 @@ async function step3_invokeCeoHeartbeat(issueId: string): Promise<void> {
 async function step4_verifySubIssues(parentIssueId: string): Promise<PaperclipIssue[]> {
   header("Step 4: Verify CEO Created Sub-Issues");
 
-  let allIssues = await paperclip<PaperclipIssue[]>(
-    "GET",
-    `/api/companies/${COMPANY_ID}/issues?parentId=${parentIssueId}`,
-  );
-
-  // Fallback: search by assignee for very recent issues
-  if (allIssues.length === 0) {
-    const barryIssues = await paperclip<PaperclipIssue[]>(
-      "GET",
-      `/api/companies/${COMPANY_ID}/issues?assigneeAgentId=${AGENTS.quickFlow}`,
-    );
-    const twoMinAgo = new Date(Date.now() - 120_000).toISOString();
-    allIssues = barryIssues.filter((i) => {
-      if (i.status === "cancelled") return false;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const created = (i as any).createdAt as string | undefined;
-      return created && created > twoMinAgo;
-    });
-  }
+  const allIssues = await findSubIssues(parentIssueId);
 
   if (allIssues.length === 0) {
     log("⚠️ ", "No sub-issues found. Checking issue comments...");
@@ -600,15 +326,114 @@ async function step5_invokeSpecialistHeartbeat(subIssues: PaperclipIssue[]): Pro
   }
 }
 
-async function step5b_verifyCostTracking(
+/**
+ * Step 5c: Verify Phase A protocol compliance.
+ *
+ * Checks that the heartbeat correctly used the checkout protocol:
+ * - Sub-issues should be in_progress (checked out) or done (completed)
+ * - Concurrent checkout is safe (409 rejection)
+ * - Blocked-task dedup is active (skips stale blocked issues)
+ */
+async function step5c_verifyProtocolCompliance(
   parentIssueId: string,
   subIssues: PaperclipIssue[],
 ): Promise<void> {
+  header("Step 5c: Verify Phase A Protocol Compliance");
+
+  // ── 5c-1. Check sub-issue status progression ───────────────────────
+  // After heartbeat, issues that were processed should be in_progress or beyond
+  let checkedOutCount = 0;
+  for (const sub of subIssues) {
+    const current = await paperclip<PaperclipIssue>("GET", `/api/issues/${sub.id}`);
+    const status = current.status;
+
+    if (status === "in_progress" || status === "done" || status === "in_review") {
+      checkedOutCount++;
+      log("✅", `Sub-issue ${sub.id.slice(0, 8)} status: ${status} (checkout protocol active)`);
+    } else if (status === "todo" || status === "backlog") {
+      log("ℹ️ ", `Sub-issue ${sub.id.slice(0, 8)} status: ${status} (not yet processed)`);
+    } else {
+      log("⚠️ ", `Sub-issue ${sub.id.slice(0, 8)} unexpected status: ${status}`);
+    }
+  }
+
+  if (checkedOutCount > 0) {
+    log("✅", `${checkedOutCount}/${subIssues.length} sub-issues progressed past checkout`);
+  } else {
+    log("ℹ️ ", "No sub-issues progressed past checkout (specialist may not have run)");
+  }
+
+  // ── 5c-2. Verify concurrent checkout safety ────────────────────────
+  // Try to checkout an in_progress issue — should get 409 if checkout protocol works.
+  // First, find a sub-issue that is currently in_progress (already fetched statuses above).
+  let inProgressIssue: PaperclipIssue | undefined;
+  for (const sub of subIssues) {
+    const current = await paperclip<PaperclipIssue>("GET", `/api/issues/${sub.id}`);
+    if (current.status === "in_progress") {
+      inProgressIssue = current;
+      break;
+    }
+  }
+
+  if (inProgressIssue) {
+    try {
+      // Per Paperclip docs, checkout requires agentId + expectedStatuses.
+      // Use a different agent ID to simulate concurrent access.
+      const res = await fetch(
+        `${PAPERCLIP_URL}/api/issues/${inProgressIssue.id}/checkout`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agentId: AGENTS.qa, // Different agent to simulate conflict
+            expectedStatuses: ["in_progress"],
+          }),
+        },
+      );
+
+      if (res.status === 409) {
+        log("✅", "Concurrent checkout correctly rejected (409 Conflict)");
+      } else if (res.ok) {
+        log("ℹ️ ", "Checkout succeeded — issue may not have been locked (Paperclip version dependent)");
+        // Release the accidental checkout
+        await fetch(`${PAPERCLIP_URL}/api/issues/${inProgressIssue.id}/release`, { method: "POST" });
+      } else {
+        log("ℹ️ ", `Checkout returned ${res.status} — endpoint may not be available in this Paperclip version`);
+      }
+    } catch {
+      log("ℹ️ ", "Checkout endpoint not available — Paperclip may not support task locking yet");
+    }
+  }
+
+  // ── 5c-3. Verify parent issue has delegation comments ──────────────
+  const parentComments = await paperclip<PaperclipComment[]>(
+    "GET",
+    `/api/issues/${parentIssueId}/comments`,
+  );
+  const hasDelegationComment = parentComments.some((c) =>
+    c.body.includes("Delegation") || c.body.includes("delegation") ||
+    c.body.includes("sub-issue") || c.body.includes("Sub-issue") ||
+    c.body.includes("Created")
+  );
+  if (hasDelegationComment) {
+    log("✅", "Parent issue has delegation comment (audit trail intact)");
+  } else if (parentComments.length > 0) {
+    log("ℹ️ ", `Parent has ${parentComments.length} comment(s) but none match delegation pattern`);
+  } else {
+    log("⚠️ ", "No comments on parent issue — audit trail may be incomplete");
+  }
+}
+
+async function step5b_verifyCostTracking(
+  _parentIssueId: string,
+  _subIssues: PaperclipIssue[],
+): Promise<void> {
   header("Step 5b: Verify Cost Tracking");
 
-  // ── 5b-1. Check native Paperclip cost events API ────────────────────
-  // POST /api/companies/:companyId/cost-events feeds this.
-  // GET  /api/companies/:companyId/costs/by-agent returns aggregated data.
+  // Cost tracking is reported exclusively via Paperclip's native cost-events API.
+  // The heartbeat-entrypoint posts per-interaction cost events via
+  // POST /api/companies/:companyId/cost-events, which feeds the /costs dashboard.
+  // We verify the data arrived by querying the aggregated /costs/by-agent endpoint.
   try {
     const byAgent = await paperclip<Array<{
       agentId: string;
@@ -628,84 +453,11 @@ async function step5b_verifyCostTracking(
           `in=${row.inputTokens} out=${row.outputTokens}`);
       }
     } else {
-      log("ℹ️ ", "Paperclip /costs/by-agent returned 0 rows (no cost events recorded yet)");
+      log("⚠️ ", "Paperclip /costs/by-agent returned 0 rows — no cost events recorded");
+      log("ℹ️ ", "The heartbeat may not have reached the cost reporting step");
     }
   } catch (err) {
     log("⚠️ ", `Failed to query Paperclip costs API: ${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  // ── 5b-2. Check markdown comment on issue ───────────────────────────
-  const issueIdsToCheck = [
-    parentIssueId,
-    ...subIssues.map((i) => i.id),
-  ];
-
-  let costCommentFound = false;
-  let costCommentBody = "";
-
-  for (const issueId of issueIdsToCheck) {
-    const comments = await paperclip<PaperclipComment[]>(
-      "GET",
-      `/api/issues/${issueId}/comments`,
-    );
-
-    const costComment = comments.find((c) => c.body.includes("Cost Tracker"));
-    if (costComment) {
-      costCommentFound = true;
-      costCommentBody = costComment.body;
-      log("✅", `Cost tracker comment found on issue ${issueId.slice(0, 8)}`);
-      break;
-    }
-  }
-
-  if (!costCommentFound) {
-    log("⚠️ ", "No cost tracker comment found on any issue");
-    log("ℹ️ ", "The heartbeat-entrypoint may not have reached the cost reporting step");
-    return;
-  }
-
-  // Check if the cost comment is a "no interactions" diagnostic
-  if (costCommentBody.includes("No LLM interactions recorded")) {
-    log("ℹ️ ", "Cost tracker posted but recorded 0 LLM interactions");
-    log("ℹ️ ", "The agent may have used a code path that bypasses the dispatcher");
-    return;
-  }
-
-  // Parse and validate the cost summary content
-  const hasTable = costCommentBody.includes("| Metric | Value |");
-  const hasInteractions = /Interactions \| \d+/.test(costCommentBody);
-  const hasInputTokens = /Input tokens/.test(costCommentBody);
-  const hasOutputTokens = /Output tokens/.test(costCommentBody);
-  const hasCost = /Estimated cost \| \$\d+\.\d{4}/.test(costCommentBody);
-
-  if (hasTable && hasInteractions && hasInputTokens && hasOutputTokens && hasCost) {
-    log("✅", "Cost summary comment has all expected fields");
-
-    const interactionMatch = costCommentBody.match(/Interactions \| (\d+)/);
-    const inputMatch = costCommentBody.match(/Input tokens \(est\.\) \| ([0-9,]+)/);
-    const outputMatch = costCommentBody.match(/Output tokens \(est\.\) \| ([0-9,]+)/);
-    const costMatch = costCommentBody.match(/Estimated cost \| \$([0-9.]+)/);
-
-    log("📊", "Cost tracking results:", {
-      interactions: interactionMatch?.[1] ?? "?",
-      inputTokens: inputMatch?.[1] ?? "?",
-      outputTokens: outputMatch?.[1] ?? "?",
-      estimatedCost: costMatch ? `$${costMatch[1]}` : "?",
-    });
-
-    const interactions = parseInt(interactionMatch?.[1] ?? "0", 10);
-    if (interactions > 0) {
-      log("✅", `Cost tracker recorded ${interactions} LLM interaction(s)`);
-    } else {
-      log("⚠️ ", "Cost tracker shows 0 interactions — unexpected for a live heartbeat");
-    }
-  } else {
-    log("⚠️ ", "Cost summary comment found but missing expected fields");
-    log("  📝", `Table: ${hasTable}, Interactions: ${hasInteractions}, Cost: ${hasCost}`);
-  }
-
-  if (costCommentBody.includes("By Agent")) {
-    log("✅", "Cost summary includes per-agent breakdown");
   }
 }
 
@@ -713,14 +465,7 @@ async function step6_cleanup(issueId: string, subIssues: PaperclipIssue[]): Prom
   header("Step 6: Cleanup");
 
   // Resume all agents
-  for (const [, id] of Object.entries(AGENTS)) {
-    try {
-      await paperclip("POST", `/api/agents/${id}/resume`);
-    } catch {
-      // Agent may already be active
-    }
-  }
-  log("▶️ ", "All agents resumed");
+  await resumeAllAgents();
 
   if (FLAGS.skipCleanup) {
     log("⏭️ ", "Skipping issue cleanup (--skip-cleanup flag)");
@@ -754,6 +499,9 @@ async function main(): Promise<void> {
   console.log();
 
   const startTime = Date.now();
+
+  // 0. Resolve agent IDs from Paperclip API
+  await resolveAgentIds();
 
   // 1. Check prerequisites + set up workspace
   await step1_checkPrereqs();
@@ -792,6 +540,13 @@ async function main(): Promise<void> {
     await step5b_verifyCostTracking(testIssue.id, subIssues);
   } catch (err) {
     log("⚠️ ", `Cost tracking verification error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // 5c. Verify Phase A protocol compliance (checkout, concurrency, audit trail)
+  try {
+    await step5c_verifyProtocolCompliance(testIssue.id, subIssues);
+  } catch (err) {
+    log("⚠️ ", `Protocol compliance check error: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // 6. Cleanup

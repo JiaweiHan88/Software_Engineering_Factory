@@ -88,18 +88,32 @@ pnpm typecheck
 ✓ test/health-check.test.ts           (19 tests)
 ✓ test/session-manager.test.ts        (19 tests)
 ✓ test/agent-dispatcher.test.ts       (17 tests)
+✓ test/cost-tracker.test.ts            (47 tests)
+✓ test/agent-dispatcher.test.ts       (42 tests)
+✓ test/wake-context.test.ts           (34 tests)
+✓ test/paperclip-client.test.ts       (33 tests)
+✓ test/session-manager.test.ts        (30 tests)
+✓ test/ceo-orchestrator.test.ts       (28 tests)
+✓ test/heartbeat-handler.test.ts      (27 tests)
+✓ test/quality-gate-engine.test.ts    (24 tests)
+✓ test/model-strategy.test.ts         (22 tests)
+✓ test/checkout-release.test.ts       (22 tests)  ← Phase A: checkout/release/comments
+✓ test/health-check.test.ts           (19 tests)
+✓ test/retry.test.ts                  (17 tests)
 ✓ test/stall-detector.test.ts         (12 tests)
-✓ test/logger.test.ts                  (9 tests)
+✓ test/sprint-runner.test.ts          (10 tests)
 ✓ test/review-orchestrator.test.ts     (9 tests)
-✓ test/sprint-runner.test.ts           (8 tests)
+✓ test/logger.test.ts                  (9 tests)
+✓ test/health.test.ts                  (3 tests)
+✓ test/hello-bmad.test.ts              (1 test)
 
-Test Files  10 passed (10)
-     Tests  160 passed (160)
+Test Files  18 passed (18)
+     Tests  389 passed (389)
 ```
 
 ### Pass Criteria
 
-- [ ] All 160 tests pass
+- [ ] All 389 tests pass
 - [ ] Zero TypeScript errors from `pnpm typecheck`
 
 > **⛔ STOP** — If tests or typecheck fail, fix them before proceeding.

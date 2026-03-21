@@ -48,6 +48,8 @@ import { loadConfig } from "./config/config.js";
 import { allTools } from "./tools/index.js";
 import { Logger } from "./observability/logger.js";
 import { CostTracker, inferProvider } from "./observability/cost-tracker.js";
+import { initTracing, shutdownTracing } from "./observability/tracing.js";
+import { initMetrics, shutdownMetrics } from "./observability/metrics.js";
 
 const log = Logger.child("heartbeat-entrypoint");
 
@@ -402,6 +404,21 @@ async function main(): Promise<void> {
     taskId: env.taskId ?? "none",
     approvalId: env.approvalId ?? "none",
   });
+
+  // ── Step 1b: Initialize OpenTelemetry (if enabled) ──────────────────
+  // OTel env vars are injected by setup-paperclip-company.ts into each
+  // agent's adapterConfig.env. Each heartbeat process is short-lived, so
+  // we init at startup and flush+shutdown at exit.
+  const otelEnabled = process.env.OTEL_ENABLED === "true";
+  if (otelEnabled) {
+    const otelServiceName = `bmad-heartbeat-${env.agentId.slice(0, 8)}`;
+    initTracing({ enabled: true, serviceName: otelServiceName });
+    initMetrics({ enabled: true, serviceName: otelServiceName });
+    log.info("OpenTelemetry initialized for heartbeat", {
+      endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? "http://localhost:4318",
+      serviceName: otelServiceName,
+    });
+  }
 
   // ── Step 2: Create Paperclip client ──────────────────────────────────
   // In local_trusted mode (process adapter), we use board-level access
@@ -792,6 +809,19 @@ async function main(): Promise<void> {
 
   // ── Step 10: Cleanup ────────────────────────────────────────────────
   await sessionManager.stop();
+
+  // Flush and shut down OpenTelemetry exporters so all spans/metrics
+  // are delivered before the short-lived heartbeat process exits.
+  if (otelEnabled) {
+    try {
+      await shutdownTracing();
+      await shutdownMetrics();
+    } catch (err) {
+      log.warn("OTel shutdown error (non-fatal)", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   const elapsed = Date.now() - startTime;
   log.info("Heartbeat finished", {

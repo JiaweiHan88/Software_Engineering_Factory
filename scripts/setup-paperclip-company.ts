@@ -141,6 +141,23 @@ const PROCESS_ARGS = ["tsx", "src/heartbeat-entrypoint.ts"];
 const PROCESS_TIMEOUT_SEC = 900; // 15 min — outer kill fence for Paperclip process adapter
 
 /**
+ * OTel environment variables injected into every agent's process adapter env.
+ * These are read by heartbeat-entrypoint.ts to init tracing + metrics.
+ *
+ * Set OTEL_ENABLED=true in .env (or shell) to activate. When false/unset,
+ * the heartbeat entrypoint skips OTel initialization entirely (zero overhead).
+ */
+const OTEL_ENV: Record<string, string> = {
+  ...(process.env.OTEL_ENABLED === "true"
+    ? {
+        OTEL_ENABLED: "true",
+        OTEL_EXPORTER_OTLP_ENDPOINT:
+          process.env.OTEL_EXPORTER_OTLP_ENDPOINT || "http://localhost:4318",
+      }
+    : {}),
+};
+
+/**
  * Complete BMAD agent roster.
  * Order matters — agents are created top-down so `reportsTo` can resolve.
  */
@@ -569,7 +586,9 @@ async function createAgents(): Promise<Map<string, string>> {
       args: PROCESS_ARGS,
       cwd: PROJECT_ROOT,
       timeoutSec: PROCESS_TIMEOUT_SEC,
-      env: {},
+      env: {
+        ...OTEL_ENV,
+      },
     };
 
     const runtimeConfig: Record<string, unknown> = {

@@ -89,6 +89,22 @@ export PAPERCLIP_DEPLOYMENT_MODE=local_trusted
 export PAPERCLIP_HOME="${PAPERCLIP_HOME:-/tmp/paperclip-native}"
 export PAPERCLIP_INSTANCE_ID=default
 
+# ── AI Tools Bridge ───────────────────────────────────────────────────────
+export AI_TOOLS_BRIDGE_URL="http://localhost:8000"
+
+# Start bridge if not already running
+if ! curl -s --max-time 1 http://localhost:8000/health >/dev/null 2>&1; then
+  echo "🔌 Starting AI tools bridge..."
+  BRIDGE_DIR="$PAPERCLIP_REPO/ai_tools_bridge"
+  if [ -f "$BRIDGE_DIR/.venv/bin/uvicorn" ]; then
+    nohup "$BRIDGE_DIR/.venv/bin/uvicorn" src.main:app --host 0.0.0.0 --port 8000 \
+      --app-dir "$BRIDGE_DIR" > /tmp/ai-tools-bridge.log 2>&1 &
+    echo "   ✅ Bridge started (log=/tmp/ai-tools-bridge.log)"
+  else
+    echo "   ⚠️  Bridge venv not found at $BRIDGE_DIR/.venv — skipping"
+  fi
+fi
+
 # ── Start server ──────────────────────────────────────────────────────────
 cd "$PAPERCLIP_REPO"
 NODE_CMD="node --import ./server/node_modules/tsx/dist/loader.mjs server/dist/index.js"

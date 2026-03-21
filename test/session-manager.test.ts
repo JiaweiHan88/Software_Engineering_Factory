@@ -284,7 +284,7 @@ describe("SessionManager", () => {
       expect(response).toBe("Agent response");
       expect(mockSendAndWait).toHaveBeenCalledWith(
         { prompt: "Hello!" },
-        120_000,
+        900_000,
       );
     });
 

@@ -2,20 +2,21 @@
 /**
  * Setup Paperclip Company — Automated Agent Provisioning
  *
- * Programmatically provisions a Paperclip company with all BMAD agents
- * using the process adapter pointed at `heartbeat-entrypoint.ts`.
- *
- * Creates:
- * 1. Company (if not already present, via Paperclip UI — cannot create via API)
- * 2. CEO agent (orchestrator — delegates, does not do domain work)
- * 3. 9 specialist agents (PM, Architect, Developer, QA, SM, Analyst, UX, Tech Writer, QuickFlow)
- * 4. Org chart: CEO → PM, Architect, Analyst, UX, Tech Writer
+ * Programmatically provisions a complete Paperclip company with:
+ * 1. Company (created via API, ID written back to .env)
+ * 2. Company goal ("Build high quality software autonomously")
+ * 3. Project ("bmad-factory" with local workspace)
+ * 4. CEO agent (orchestrator — delegates, does not do domain work)
+ * 5. 9 specialist agents (PM, Architect, Developer, QA, SM, Analyst, UX, Tech Writer, QuickFlow)
+ * 6. Org chart: CEO → PM, Architect, Analyst, UX, Tech Writer
  *                PM → Developer, SM;  Architect → QA
- * 5. Process adapter config pointing at `npx tsx src/heartbeat-entrypoint.ts`
+ * 7. Process adapter config pointing at `npx tsx src/heartbeat-entrypoint.ts`
+ *
+ * If PAPERCLIP_COMPANY_ID is set in .env AND the company exists, it is reused.
+ * Otherwise a new company is created and .env is updated.
  *
  * Prerequisites:
  * - Paperclip running at localhost:3100 (or PAPERCLIP_URL)
- * - Company created via Paperclip UI (set PAPERCLIP_COMPANY_ID in .env)
  *
  * Usage:
  *   npx tsx scripts/setup-paperclip-company.ts
@@ -26,6 +27,7 @@
  */
 
 import "dotenv/config";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -33,19 +35,26 @@ import { resolve } from "node:path";
 // ─────────────────────────────────────────────────────────────────────────────
 
 const PAPERCLIP_URL = process.env.PAPERCLIP_URL ?? "http://localhost:3100";
-const COMPANY_ID = process.env.PAPERCLIP_COMPANY_ID;
+let COMPANY_ID = process.env.PAPERCLIP_COMPANY_ID;
 const PROJECT_ROOT = resolve(import.meta.dirname ?? process.cwd(), "..");
+const ENV_FILE = resolve(PROJECT_ROOT, ".env");
+
+/** Company defaults — used when creating a new company. */
+const COMPANY_NAME = "BMAD Copilot Factory";
+const COMPANY_DESCRIPTION = "Autonomous software building system using BMAD method + Paperclip orchestration";
+const COMPANY_BUDGET_CENTS = 500_000; // $5,000/month
+
+/** Default project and goal. */
+const PROJECT_NAME = "bmad-factory";
+const PROJECT_DESCRIPTION = "Primary BMAD software factory workspace";
+const GOAL_TITLE = "Build high quality software autonomously";
+const GOAL_DESCRIPTION = "Deliver production-ready software through autonomous agent collaboration using the BMAD methodology";
 
 const FLAGS = {
   dryRun: process.argv.includes("--dry-run"),
   reset: process.argv.includes("--reset"),
   verbose: process.argv.includes("--verbose"),
 };
-
-if (!COMPANY_ID) {
-  console.error("❌ PAPERCLIP_COMPANY_ID is required. Create a company in the Paperclip UI first, then set it in .env");
-  process.exit(1);
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -68,23 +77,53 @@ interface PaperclipAgent {
   metadata?: Record<string, unknown>;
 }
 
+interface PaperclipCompany {
+  id: string;
+  name: string;
+  description: string | null;
+  status: string;
+  issuePrefix: string;
+  issueCounter: number;
+  budgetMonthlyCents: number;
+}
+
+interface PaperclipProject {
+  id: string;
+  name: string;
+  description?: string;
+  codebase?: {
+    effectiveLocalFolder?: string;
+    managedFolder?: string;
+  };
+}
+
+interface PaperclipGoal {
+  id: string;
+  title: string;
+  description?: string;
+}
+
 /**
  * Agent definition for provisioning.
  */
 interface AgentDef {
   /** Unique name in Paperclip (also used as lookup key) */
   name: string;
-  /** BMAD role title (matches role-mapping.ts keys) */
+  /** Human-readable display title */
   title: string;
   /** Paperclip role category */
   role: string;
+  /** Lucide icon name for the Paperclip UI */
+  icon: string;
   /** Human-readable capabilities description */
   capabilities: string;
   /** Directory name under agents/ for 4-file config set */
   configDir: string;
   /** Agent this one reports to (by name) */
   reportsTo: string | null;
-  /** Heartbeat interval in seconds */
+  /** Whether the periodic timer heartbeat is enabled */
+  heartbeatEnabled: boolean;
+  /** Heartbeat interval in seconds (0 = no timer) */
   heartbeatIntervalSec: number;
   /** Monthly budget in cents */
   budgetMonthlyCents: number;
@@ -96,9 +135,10 @@ interface AgentDef {
 // Agent Definitions (Org Chart)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Process adapter command shared by all agents. */
-const PROCESS_COMMAND = "npx tsx src/heartbeat-entrypoint.ts";
-const PROCESS_TIMEOUT_SEC = 600;
+/** Process adapter command + args shared by all agents. */
+const PROCESS_COMMAND = "npx";
+const PROCESS_ARGS = ["tsx", "src/heartbeat-entrypoint.ts"];
+const PROCESS_TIMEOUT_SEC = 900; // 15 min — outer kill fence for Paperclip process adapter
 
 /**
  * Complete BMAD agent roster.
@@ -108,12 +148,14 @@ const AGENT_DEFS: AgentDef[] = [
   // ── Tier 0: CEO ─────────────────────────────────────────────────────
   {
     name: "bmad-ceo",
-    title: "ceo",
-    role: "executive",
+    title: "CEO",
+    role: "ceo",
+    icon: "crown",
     capabilities: "Strategic orchestration, issue decomposition, phased delegation, progress monitoring, governance",
     configDir: "ceo",
     reportsTo: null,
-    heartbeatIntervalSec: 120,
+    heartbeatEnabled: true,
+    heartbeatIntervalSec: 300, // 5-min oversight sweep
     budgetMonthlyCents: 50_000,
     bmadSkills: ["bmad-help"],
   },
@@ -121,12 +163,14 @@ const AGENT_DEFS: AgentDef[] = [
   // ── Tier 1: Direct reports to CEO ────────────────────────────────────
   {
     name: "bmad-pm",
-    title: "bmad-pm",
-    role: "manager",
+    title: "John",
+    role: "pm",
+    icon: "clipboard",
     capabilities: "PRD creation, user stories, market research, requirements, epics, brainstorming, product briefs",
     configDir: "pm",
     reportsTo: "bmad-ceo",
-    heartbeatIntervalSec: 60,
+    heartbeatEnabled: false,
+    heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 30_000,
     bmadSkills: [
       "bmad-brainstorming", "bmad-market-research", "bmad-create-product-brief",
@@ -137,45 +181,53 @@ const AGENT_DEFS: AgentDef[] = [
   },
   {
     name: "bmad-architect",
-    title: "bmad-architect",
-    role: "architect",
+    title: "Winston",
+    role: "engineer",
+    icon: "blocks",
     capabilities: "Architecture design, technical research, domain research, system design, technology evaluation",
     configDir: "architect",
     reportsTo: "bmad-ceo",
-    heartbeatIntervalSec: 60,
+    heartbeatEnabled: false,
+    heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 30_000,
     bmadSkills: ["bmad-create-architecture", "bmad-technical-research", "bmad-domain-research"],
   },
   {
     name: "bmad-analyst",
-    title: "bmad-analyst",
+    title: "Mary",
     role: "researcher",
+    icon: "bar-chart-3",
     capabilities: "Market analysis, domain research, brainstorming, advanced elicitation, feasibility studies",
     configDir: "analyst",
     reportsTo: "bmad-ceo",
-    heartbeatIntervalSec: 60,
+    heartbeatEnabled: false,
+    heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 20_000,
     bmadSkills: ["bmad-brainstorming", "bmad-market-research", "bmad-domain-research", "bmad-advanced-elicitation"],
   },
   {
     name: "bmad-ux-designer",
-    title: "bmad-ux-designer",
+    title: "Sally",
     role: "designer",
+    icon: "layout-template",
     capabilities: "UX patterns, interaction design, wireframes, design specs, accessibility",
     configDir: "ux-designer",
     reportsTo: "bmad-ceo",
-    heartbeatIntervalSec: 60,
+    heartbeatEnabled: false,
+    heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 15_000,
     bmadSkills: ["bmad-create-ux-design"],
   },
   {
     name: "bmad-tech-writer",
-    title: "bmad-tech-writer",
+    title: "Paige",
     role: "engineer",
+    icon: "notebook-pen",
     capabilities: "Documentation, project context generation, editorial review, doc sharding, indexing",
     configDir: "tech-writer",
     reportsTo: "bmad-ceo",
-    heartbeatIntervalSec: 60,
+    heartbeatEnabled: false,
+    heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 15_000,
     bmadSkills: [
       "bmad-document-project", "bmad-generate-project-context",
@@ -187,23 +239,27 @@ const AGENT_DEFS: AgentDef[] = [
   // ── Tier 2: Reports to PM ────────────────────────────────────────────
   {
     name: "bmad-dev",
-    title: "bmad-dev",
+    title: "Amelia",
     role: "engineer",
+    icon: "code",
     capabilities: "Story implementation, code writing, test creation, quick development, TypeScript specialist",
     configDir: "developer",
     reportsTo: "bmad-pm",
-    heartbeatIntervalSec: 60,
+    heartbeatEnabled: false,
+    heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 30_000,
     bmadSkills: ["bmad-dev-story", "bmad-quick-dev", "bmad-quick-spec"],
   },
   {
     name: "bmad-sm",
-    title: "bmad-sm",
-    role: "manager",
+    title: "Bob",
+    role: "pm",
+    icon: "gantt-chart",
     capabilities: "Sprint planning, sprint status, course correction, retrospectives, impediment removal",
     configDir: "scrum-master",
     reportsTo: "bmad-pm",
-    heartbeatIntervalSec: 90,
+    heartbeatEnabled: false,
+    heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 15_000,
     bmadSkills: ["bmad-sprint-planning", "bmad-sprint-status", "bmad-correct-course", "bmad-retrospective"],
   },
@@ -211,12 +267,14 @@ const AGENT_DEFS: AgentDef[] = [
   // ── Tier 2: Reports to Architect ─────────────────────────────────────
   {
     name: "bmad-qa",
-    title: "bmad-qa",
-    role: "engineer",
+    title: "Quinn",
+    role: "qa",
+    icon: "test-tube",
     capabilities: "Code review, adversarial review, edge-case hunting, E2E test generation, quality gates, test architecture",
     configDir: "qa",
     reportsTo: "bmad-architect",
-    heartbeatIntervalSec: 60,
+    heartbeatEnabled: false,
+    heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 25_000,
     bmadSkills: [
       "bmad-code-review", "bmad-review-adversarial-general", "bmad-review-edge-case-hunter",
@@ -229,12 +287,14 @@ const AGENT_DEFS: AgentDef[] = [
   // ── Standalone: Quick-Flow Solo Dev ──────────────────────────────────
   {
     name: "bmad-quick-flow",
-    title: "bmad-quick-flow-solo-dev",
+    title: "Barry",
     role: "engineer",
+    icon: "fast-forward",
     capabilities: "Full solo dev flow: spec, implement, review in one pass. For quick/small tasks",
     configDir: "quick-flow",
     reportsTo: "bmad-pm",
-    heartbeatIntervalSec: 60,
+    heartbeatEnabled: false,
+    heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 20_000,
     bmadSkills: ["bmad-quick-flow-solo-dev", "bmad-dev-story", "bmad-quick-dev", "bmad-create-story", "bmad-code-review"],
   },
@@ -293,14 +353,44 @@ async function paperclip<T>(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// .env Management
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Update a key=value pair in the .env file.
+ * If the key exists, its value is replaced. Otherwise, the key is appended.
+ */
+function updateEnvFile(key: string, value: string): void {
+  if (FLAGS.dryRun) {
+    log(`${DIM}[dry-run]${NC}`, `.env: ${key}=${value}`);
+    return;
+  }
+
+  let content = "";
+  if (existsSync(ENV_FILE)) {
+    content = readFileSync(ENV_FILE, "utf-8");
+  }
+
+  const pattern = new RegExp(`^${key}=.*$`, "m");
+  if (pattern.test(content)) {
+    content = content.replace(pattern, `${key}=${value}`);
+  } else {
+    content = content.trimEnd() + `\n${key}=${value}\n`;
+  }
+  writeFileSync(ENV_FILE, content, "utf-8");
+  log("📝", `.env updated: ${key}=${value}`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Setup Steps
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Step 1: Verify Paperclip is reachable and company exists.
+ * Step 1: Verify Paperclip is reachable and ensure company exists.
+ * Creates a new company if PAPERCLIP_COMPANY_ID is not set or company is gone.
  */
-async function verifyPrerequisites(): Promise<void> {
-  header("Step 1: Verify Prerequisites");
+async function ensureCompany(): Promise<void> {
+  header("Step 1: Ensure Company");
 
   // Check Paperclip health
   try {
@@ -312,18 +402,38 @@ async function verifyPrerequisites(): Promise<void> {
     process.exit(1);
   }
 
-  // Verify company exists (cannot create via API — must use UI)
-  try {
-    const agents = await paperclip<PaperclipAgent[]>(
-      "GET",
-      `/api/companies/${COMPANY_ID}/agents`,
-    );
-    log("✅", `Company ${COMPANY_ID} exists (${agents.length} agents currently)`);
-  } catch (err) {
-    log(`${RED}❌${NC}`, `Company ${COMPANY_ID} not found`);
-    console.error("\n  Create a company in the Paperclip UI first, then set PAPERCLIP_COMPANY_ID in .env\n");
-    process.exit(1);
+  // If we have a COMPANY_ID, check it still exists
+  if (COMPANY_ID) {
+    try {
+      const agents = await paperclip<PaperclipAgent[]>(
+        "GET",
+        `/api/companies/${COMPANY_ID}/agents`,
+      );
+      log("✅", `Company ${COMPANY_ID} exists (${agents.length} agents currently)`);
+      return;
+    } catch {
+      log(`${YELLOW}⚠️${NC}`, `Company ${COMPANY_ID} not found — will create a new one`);
+    }
   }
+
+  // Create a new company
+  const company = await paperclip<PaperclipCompany>("POST", "/api/companies", {
+    name: COMPANY_NAME,
+    description: COMPANY_DESCRIPTION,
+    budgetMonthlyCents: COMPANY_BUDGET_CENTS,
+    requireBoardApprovalForNewAgents: false,
+  });
+  COMPANY_ID = company.id;
+  log(`${GREEN}✅${NC}`, `Created company: ${company.name} → ${company.id}`);
+
+  // Paperclip ignores requireBoardApprovalForNewAgents on create — PATCH it
+  await paperclip("PATCH", `/api/companies/${company.id}`, {
+    requireBoardApprovalForNewAgents: false,
+  });
+  log("📝", "Disabled board approval for new agent hires");
+
+  // Persist to .env
+  updateEnvFile("PAPERCLIP_COMPANY_ID", company.id);
 }
 
 /**
@@ -358,6 +468,59 @@ async function resetExistingAgents(): Promise<void> {
   }
 
   log("✅", `Terminated ${existing.filter((a) => a.status !== "terminated").length} agents`);
+}
+
+/**
+ * Step 2b: Ensure a company goal exists.
+ */
+async function ensureGoal(): Promise<void> {
+  header("Step 2b: Ensure Company Goal");
+
+  const goals = await paperclip<PaperclipGoal[]>(
+    "GET",
+    `/api/companies/${COMPANY_ID}/goals`,
+  );
+
+  const existing = goals.find((g) => g.title === GOAL_TITLE);
+  if (existing) {
+    log("♻️ ", `Goal already exists: ${existing.title} (${existing.id})`);
+    return;
+  }
+
+  const goal = await paperclip<PaperclipGoal>(
+    "POST",
+    `/api/companies/${COMPANY_ID}/goals`,
+    { title: GOAL_TITLE, description: GOAL_DESCRIPTION },
+  );
+  log(`${GREEN}✅${NC}`, `Created goal: ${goal.title} → ${goal.id}`);
+}
+
+/**
+ * Step 2c: Ensure a project exists with workspace pointing at this repo.
+ */
+async function ensureProject(): Promise<void> {
+  header("Step 2c: Ensure Project");
+
+  const projects = await paperclip<PaperclipProject[]>(
+    "GET",
+    `/api/companies/${COMPANY_ID}/projects`,
+  );
+
+  const existing = projects.find((p) => p.name === PROJECT_NAME);
+  if (existing) {
+    log("♻️ ", `Project already exists: ${existing.name} (${existing.id})`);
+    return;
+  }
+
+  const project = await paperclip<PaperclipProject>(
+    "POST",
+    `/api/companies/${COMPANY_ID}/projects`,
+    {
+      name: PROJECT_NAME,
+      description: PROJECT_DESCRIPTION,
+    },
+  );
+  log(`${GREEN}✅${NC}`, `Created project: ${project.name} → ${project.id}`);
 }
 
 /**
@@ -403,6 +566,7 @@ async function createAgents(): Promise<Map<string, string>> {
     // Build process adapter config
     const adapterConfig: Record<string, unknown> = {
       command: PROCESS_COMMAND,
+      args: PROCESS_ARGS,
       cwd: PROJECT_ROOT,
       timeoutSec: PROCESS_TIMEOUT_SEC,
       env: {},
@@ -410,26 +574,28 @@ async function createAgents(): Promise<Map<string, string>> {
 
     const runtimeConfig: Record<string, unknown> = {
       heartbeat: {
-        enabled: true,
+        enabled: def.heartbeatEnabled,
         intervalSec: def.heartbeatIntervalSec,
         wakeOnDemand: true,
       },
     };
 
     const metadata: Record<string, unknown> = {
-      bmadRole: def.title,
+      bmadRole: def.name,
       bmadSkills: def.bmadSkills,
       configDir: def.configDir,
     };
 
     try {
-      const created = await paperclip<PaperclipAgent>(
+      // agent-hires returns { agent, approval } wrapper — extract .agent
+      const response = await paperclip<{ agent: PaperclipAgent; approval: unknown }>(
         "POST",
         `/api/companies/${COMPANY_ID}/agent-hires`,
         {
           name: def.name,
           role: def.role,
           title: def.title,
+          icon: def.icon,
           capabilities: def.capabilities,
           adapterType: "process",
           adapterConfig,
@@ -439,6 +605,7 @@ async function createAgents(): Promise<Map<string, string>> {
         },
       );
 
+      const created = response.agent;
       agentIds.set(def.name, created.id);
       log(`${GREEN}✅${NC}`, `Created: ${def.name} → ${created.id}`);
     } catch (err) {
@@ -447,6 +614,48 @@ async function createAgents(): Promise<Map<string, string>> {
   }
 
   return agentIds;
+}
+
+/**
+ * Step 3b: Auto-approve any pending agent hire approvals.
+ *
+ * When requireBoardApprovalForNewAgents was true at hire time,
+ * agents land in "pending_approval" status. This approves them all.
+ */
+async function autoApproveAgents(): Promise<void> {
+  interface PaperclipApproval {
+    id: string;
+    type: string;
+    status: string;
+  }
+
+  const approvals = await paperclip<PaperclipApproval[]>(
+    "GET",
+    `/api/companies/${COMPANY_ID}/approvals`,
+  );
+
+  const pending = approvals.filter(
+    (a) => a.type === "hire_agent" && a.status === "pending",
+  );
+
+  if (pending.length === 0) {
+    return;
+  }
+
+  header("Step 3b: Auto-Approve Agent Hires");
+
+  for (const approval of pending) {
+    try {
+      await paperclip("POST", `/api/approvals/${approval.id}/approve`, {
+        decisionNote: "Auto-approved by setup script",
+      });
+      log(`${GREEN}✅${NC}`, `Approved: ${approval.id}`);
+    } catch (err) {
+      log(`${RED}❌${NC}`, `Failed to approve ${approval.id}: ${err}`);
+    }
+  }
+
+  log("✅", `Auto-approved ${pending.length} agent hire(s)`);
 }
 
 /**
@@ -501,6 +710,7 @@ async function setInstructionsPaths(agentIds: Map<string, string>): Promise<void
       await paperclip("PATCH", `/api/agents/${agentId}`, {
         adapterConfig: {
           command: PROCESS_COMMAND,
+          args: PROCESS_ARGS,
           cwd: PROJECT_ROOT,
           timeoutSec: PROCESS_TIMEOUT_SEC,
           instructionsFilePath: instructionsPath,
@@ -581,16 +791,36 @@ async function verifySetup(agentIds: Map<string, string>): Promise<void> {
 async function main(): Promise<void> {
   console.log(`\n🏭 ${CYAN}BMAD Copilot Factory — Paperclip Company Setup${NC}\n`);
   console.log(`   Paperclip URL:  ${PAPERCLIP_URL}`);
-  console.log(`   Company ID:     ${COMPANY_ID}`);
+  console.log(`   Company ID:     ${COMPANY_ID ?? "(will create new)"}`);
   console.log(`   Project Root:   ${PROJECT_ROOT}`);
   console.log(`   Dry Run:        ${FLAGS.dryRun}`);
   console.log(`   Reset:          ${FLAGS.reset}`);
 
-  await verifyPrerequisites();
+  // Step 1: Ensure company exists (create if needed)
+  await ensureCompany();
+
+  // Step 2: Optionally reset existing agents
   await resetExistingAgents();
+
+  // Step 2b: Ensure goal
+  await ensureGoal();
+
+  // Step 2c: Ensure project
+  await ensureProject();
+
+  // Step 3: Create agents
   const agentIds = await createAgents();
+
+  // Step 3b: Auto-approve any pending hires
+  await autoApproveAgents();
+
+  // Step 4: Wire org chart
   await wireOrgChart(agentIds);
+
+  // Step 5: Set instructions paths
   await setInstructionsPaths(agentIds);
+
+  // Step 6: Verify
   await verifySetup(agentIds);
 
   console.log(`\n${GREEN}✅ Setup complete!${NC}\n`);

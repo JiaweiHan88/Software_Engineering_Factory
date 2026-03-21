@@ -181,6 +181,7 @@ export class SessionManager {
     // Build session config
     const sessionConfig: SessionConfig = {
       onPermissionRequest: approveAll,
+      streaming: true,
       customAgents,
       tools,
       infiniteSessions: { enabled: false },
@@ -316,14 +317,14 @@ export class SessionManager {
    *
    * @param sessionId - Session ID from createAgentSession
    * @param prompt - The prompt to send (can include @agent mentions)
-   * @param timeoutMs - Timeout in milliseconds (default 120s)
+   * @param timeoutMs - Timeout in milliseconds (default 900s / 15 min)
    * @param onDelta - Optional callback for streaming deltas
    * @returns Full response content
    */
   async sendAndWait(
     sessionId: string,
     prompt: string,
-    timeoutMs = 120_000,
+    timeoutMs = 900_000,
     onDelta?: (delta: string) => void,
   ): Promise<string> {
     const tracked = this.sessions.get(sessionId);

@@ -110,15 +110,34 @@ export async function resolveAgentId(
     try {
       const agents = await client.listAgents();
       for (const agent of agents) {
-        // Paperclip agents have BMAD role name in the `title` field
-        if (agent.title) {
-          agentIdCache.set(agent.title.toLowerCase(), agent.id);
-        }
-        // Also map by agent name (kebab-cased display name)
+        // Map by agent name (primary key — e.g., "bmad-quick-flow")
         if (agent.name) {
           agentIdCache.set(agent.name.toLowerCase(), agent.id);
         }
+        // Map by human title (e.g., "Barry", "Quinn")
+        if (agent.title) {
+          agentIdCache.set(agent.title.toLowerCase(), agent.id);
+        }
+        // Map by metadata.bmadRole (e.g., from setup script)
+        const bmadRole = (agent.metadata as Record<string, unknown> | undefined)?.bmadRole;
+        if (typeof bmadRole === "string") {
+          agentIdCache.set(bmadRole.toLowerCase(), agent.id);
+        }
       }
+
+      // Add known aliases — the LLM may generate role names from
+      // the BMAD config (bmad-quick-flow-solo-dev) rather than the
+      // Paperclip agent name (bmad-quick-flow). Map both to resolve.
+      const ALIASES: Record<string, string> = {
+        "bmad-quick-flow-solo-dev": "bmad-quick-flow",
+      };
+      for (const [alias, canonical] of Object.entries(ALIASES)) {
+        const target = agentIdCache.get(canonical.toLowerCase());
+        if (target && !agentIdCache.has(alias.toLowerCase())) {
+          agentIdCache.set(alias.toLowerCase(), target);
+        }
+      }
+
       log.info("Agent ID cache built", { entries: agentIdCache.size });
     } catch (err) {
       log.error("Failed to build agent ID cache", {}, err instanceof Error ? err : undefined);
@@ -151,8 +170,8 @@ function buildDelegationPrompt(
   agentRoster: PaperclipAgent[],
 ): string {
   const rosterSummary = agentRoster
-    .filter((a) => a.title !== "ceo") // Exclude CEO from delegation targets
-    .map((a) => `  - ${a.title}: ${a.capabilities ?? a.role} (id: ${a.id})`)
+    .filter((a) => a.name !== "bmad-ceo") // Exclude CEO from delegation targets
+    .map((a) => `  - ${a.name} (${a.title}): ${a.capabilities ?? a.role}`)
     .join("\n");
 
   return `You are the CEO of the BMAD Copilot Factory. An issue has been assigned to you for delegation.
@@ -178,7 +197,7 @@ Analyze this issue and create a delegation plan. Follow the BMAD pipeline:
 Rules:
 - Do NOT skip phases. If the issue is vague, start with Research.
 - If the issue is already well-defined (clear requirements, clear architecture), you may skip to Plan or Execute.
-- For simple/quick tasks, consider assigning to Quick Flow (bmad-quick-flow-solo-dev) who handles spec+implement+review in one pass.
+- For simple/quick tasks, consider assigning to Quick Flow (bmad-quick-flow) who handles spec+implement+review in one pass.
 - Each sub-task must be self-contained with enough context for the assigned agent.
 - Set priority based on the parent issue priority and task criticality.
 
@@ -319,19 +338,11 @@ export async function orchestrateCeoIssue(
     title: issue.title,
   });
 
-  // Mark the parent issue as in_progress — CEO is actively working on delegation.
-  // This prevents the CEO from re-processing the same issue on subsequent heartbeats
-  // (the inbox filter skips in_progress issues for orchestrators).
-  try {
-    await client.updateIssue(issue.id, { status: "in_progress" });
-  } catch {
-    // Non-critical — issue may already be in_progress or the update may fail
-    // due to activity_log FK constraints. The inbox filter will still work
-    // because the issue status is checked after fetching.
-    log.warn("Could not set parent issue to in_progress (non-critical)", {
-      issueId: issue.id,
-    });
-  }
+  // NOTE: The parent issue is already in_progress from checkout (heartbeat-entrypoint
+  // calls checkoutIssue() before orchestrateCeoIssue). Per Paperclip SKILL.md:
+  // "Always checkout before working. Never PATCH to in_progress manually."
+  // The delegation dedup guard in the entrypoint (checking for existing children)
+  // prevents re-processing on subsequent heartbeats.
 
   // ── 1. Get agent roster for delegation targets ──────────────────────
   let agentRoster: PaperclipAgent[];
@@ -377,7 +388,7 @@ export async function orchestrateCeoIssue(
     response = await sessionManager.sendAndWait(
       sessionId,
       prompt,
-      120_000, // 2 min timeout for CEO reasoning
+      300_000, // 5 min timeout for CEO reasoning
     );
   } catch (err) {
     const msg = `CEO session failed: ${err instanceof Error ? err.message : String(err)}`;

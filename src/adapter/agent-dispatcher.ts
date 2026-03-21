@@ -477,11 +477,11 @@ export class AgentDispatcher {
             this.sessionManager.setSessionStory(sessionId, item.storyId);
           }
 
-          // Send the prompt (5 min timeout — agent may spawn sub-agents with many tool calls)
+          // Send the prompt (15 min timeout — agent may spawn sub-agents with many tool calls)
           const response = await this.sessionManager.sendAndWait(
             sessionId,
             prompt,
-            300_000,
+            900_000,
             onDelta,
           );
 
@@ -563,7 +563,7 @@ export class AgentDispatcher {
       const response = await this.sessionManager.sendAndWait(
         sessionId,
         `@${agentName} ${prompt}`,
-        300_000,
+        900_000,
         onDelta,
       );
 

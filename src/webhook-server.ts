@@ -128,6 +128,7 @@ async function processHeartbeat(payload: HeartbeatPayload): Promise<{ success: b
     const paperclipClient = new PaperclipClient({
       baseUrl: PAPERCLIP_URL,
       agentApiKey: payload.agentApiKey,
+      agentId,
       companyId: COMPANY_ID!,
       heartbeatRunId: runId,
     });

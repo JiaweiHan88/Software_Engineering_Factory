@@ -160,6 +160,8 @@ export interface PaperclipClientOptions {
   agentApiKey?: string;
   /** Company ID to scope company-level requests */
   companyId?: string;
+  /** Agent UUID — required for checkout/release protocol (Phase A) */
+  agentId?: string;
   /** Request timeout in milliseconds (default 10_000) */
   timeoutMs?: number;
   /**
@@ -200,6 +202,7 @@ export interface PaperclipClientOptions {
 export class PaperclipClient {
   private baseUrl: string;
   private agentApiKey?: string;
+  private agentId?: string;
   private companyId: string;
   private timeoutMs: number;
   private heartbeatRunId?: string;
@@ -208,6 +211,7 @@ export class PaperclipClient {
     // Strip trailing slash
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.agentApiKey = opts.agentApiKey;
+    this.agentId = opts.agentId;
     this.companyId = opts.companyId ?? "default";
     this.timeoutMs = opts.timeoutMs ?? 10_000;
     this.heartbeatRunId = opts.heartbeatRunId;
@@ -538,6 +542,97 @@ export class PaperclipClient {
   }
 
   /**
+   * Checkout (lock) an issue before doing any work.
+   *
+   * Paperclip SKILL.md Step 5: "You MUST checkout before doing any work."
+   * Without checkout, two heartbeat runs can process the same issue simultaneously,
+   * causing duplicate work and conflicting state.
+   *
+   * Real endpoint: POST /api/issues/:id/checkout
+   *
+   * @param issueId - The issue ID to checkout
+   * @param expectedStatuses - Only checkout if the issue is in one of these statuses (required, non-empty)
+   * @returns The updated issue (status auto-set to in_progress), or the existing issue if
+   *          already assigned to this agent (invoke-triggered executionRunId lock), or
+   *          `null` if another agent owns the checkout
+   */
+  async checkoutIssue(
+    issueId: string,
+    expectedStatuses: string[],
+  ): Promise<PaperclipIssue | null> {
+    if (!this.agentId) {
+      throw new Error(
+        "PaperclipClient.checkoutIssue() requires agentId — pass it in PaperclipClientOptions",
+      );
+    }
+    if (!expectedStatuses || expectedStatuses.length === 0) {
+      throw new Error(
+        "PaperclipClient.checkoutIssue() requires non-empty expectedStatuses",
+      );
+    }
+    try {
+      return await this.request<PaperclipIssue>(
+        "POST",
+        `/api/issues/${issueId}/checkout`,
+        {
+          agentId: this.agentId,
+          expectedStatuses,
+        },
+      );
+    } catch (err) {
+      if (err instanceof PaperclipApiError && err.statusCode === 409) {
+        // 409 Conflict — could be:
+        // (a) Another agent owns the checkout → skip
+        // (b) Paperclip's enqueueWakeup already set executionRunId for OUR agent
+        //     (common in invoke-triggered heartbeats). In board-access mode our
+        //     checkoutRunId is null, so the SQL rejects us even though we are
+        //     the rightful assignee. Detect this and treat as "already ours".
+        try {
+          const issue = await this.getIssue(issueId);
+          if (issue.assigneeAgentId === this.agentId) {
+            // We are the assignee — the executionRunId lock is ours from the invoke.
+            return issue;
+          }
+        } catch {
+          // If we can't fetch the issue, fall through to null (skip)
+        }
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Release a previously checked-out issue.
+   *
+   * Called on error/timeout paths to release the checkout lock so another
+   * agent (or a future heartbeat) can pick up the task.
+   *
+   * Real endpoint: POST /api/issues/:id/release
+   *
+   * Idempotent: releasing an unchecked-out task is a no-op (does not throw).
+   *
+   * @param issueId - The issue ID to release
+   */
+  async releaseIssue(issueId: string): Promise<void> {
+    try {
+      await this.request<void>(
+        "POST",
+        `/api/issues/${issueId}/release`,
+      );
+    } catch (err) {
+      // Releasing an unchecked-out task is a no-op — swallow 404/409
+      if (
+        err instanceof PaperclipApiError &&
+        (err.statusCode === 404 || err.statusCode === 409)
+      ) {
+        return;
+      }
+      throw err;
+    }
+  }
+
+  /**
    * Add a comment to an issue (primary mechanism for reporting results).
    * Real endpoint: POST /api/issues/:id/comments
    *
@@ -549,6 +644,48 @@ export class PaperclipClient {
       "POST",
       `/api/issues/${issueId}/comments`,
       { body },
+    );
+  }
+
+  /**
+   * Get comments on an issue — supports incremental reads via `after` cursor.
+   *
+   * Real endpoint: GET /api/issues/:id/comments
+   *
+   * @param issueId - The issue ID to get comments for
+   * @param options - Optional: `after` comment ID for incremental reads, `order` (asc/desc)
+   * @returns Array of comments
+   */
+  async getIssueComments(
+    issueId: string,
+    options?: { after?: string; order?: "asc" | "desc" },
+  ): Promise<PaperclipIssueComment[]> {
+    const params = new URLSearchParams();
+    if (options?.after) params.set("after", options.after);
+    if (options?.order) params.set("order", options.order);
+    const qs = params.toString();
+    return this.request<PaperclipIssueComment[]>(
+      "GET",
+      `/api/issues/${issueId}/comments${qs ? `?${qs}` : ""}`,
+    );
+  }
+
+  /**
+   * Get a single comment by ID.
+   *
+   * Real endpoint: GET /api/issues/:id/comments/:commentId
+   *
+   * @param issueId - The issue ID
+   * @param commentId - The comment ID
+   * @returns The comment
+   */
+  async getIssueComment(
+    issueId: string,
+    commentId: string,
+  ): Promise<PaperclipIssueComment> {
+    return this.request<PaperclipIssueComment>(
+      "GET",
+      `/api/issues/${issueId}/comments/${commentId}`,
     );
   }
 

@@ -52,6 +52,32 @@ import { CostTracker, inferProvider } from "./observability/cost-tracker.js";
 const log = Logger.child("heartbeat-entrypoint");
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Utilities
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Detect if a comment body is a blocked-status update posted by this agent.
+ *
+ * Used for blocked-task dedup (Phase A7): if the agent's last comment is a
+ * "blocked" status update and no new comments have arrived, skip re-processing.
+ *
+ * @param body - Comment text to inspect
+ * @returns true if the comment matches blocked-status patterns
+ */
+function isBlockedStatusComment(body: string): boolean {
+  if (!body) return false;
+  const lower = body.toLowerCase();
+  return (
+    lower.includes("blocked") &&
+    (lower.includes("status") ||
+      lower.includes("waiting") ||
+      lower.includes("⏸") ||
+      lower.includes("🚫") ||
+      lower.startsWith("⛔"))
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Environment Extraction
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -64,6 +90,8 @@ const log = Logger.child("heartbeat-entrypoint");
  * It does NOT inject PAPERCLIP_AGENT_API_KEY — that's only used by
  * standalone polling mode. In process adapter mode, auth is handled
  * by Paperclip's deployment mode (local_trusted = board access).
+ *
+ * Phase A3: Extended with full wake context env vars from Paperclip SKILL.md.
  */
 interface PaperclipEnv {
   /** Agent API key for Bearer auth (optional — not set by process adapter) */
@@ -74,8 +102,23 @@ interface PaperclipEnv {
   companyId: string;
   /** Agent UUID */
   agentId: string;
-  /** Current heartbeat run ID */
+  /** Current heartbeat run ID (Phase A5: accepts both env var names) */
   heartbeatRunId: string | undefined;
+
+  // ── Wake Context (Phase A3) ───────────────────────────────────────
+
+  /** Issue that triggered this wake — prioritize this task first */
+  taskId: string | undefined;
+  /** Why this run was triggered: timer | assignment | on_demand | comment */
+  wakeReason: string | undefined;
+  /** Specific comment that triggered wake — read this first */
+  wakeCommentId: string | undefined;
+  /** Approval that needs handling */
+  approvalId: string | undefined;
+  /** Approval outcome: approved | denied */
+  approvalStatus: string | undefined;
+  /** Comma-separated linked issue IDs (parsed into array) */
+  linkedIssueIds: string[] | undefined;
 }
 
 /**
@@ -83,6 +126,9 @@ interface PaperclipEnv {
  *
  * Accepts both process adapter env vars (PAPERCLIP_API_URL) and
  * standalone env vars (PAPERCLIP_URL, PAPERCLIP_AGENT_API_KEY) for flexibility.
+ *
+ * Phase A3: Also reads wake context env vars (PAPERCLIP_TASK_ID, WAKE_REASON, etc.)
+ * Phase A5: Accepts both PAPERCLIP_RUN_ID and PAPERCLIP_HEARTBEAT_RUN_ID.
  *
  * @throws Error if required env vars are missing
  */
@@ -96,7 +142,12 @@ function extractPaperclipEnv(): PaperclipEnv {
 
   const companyId = process.env.PAPERCLIP_COMPANY_ID;
   const agentId = process.env.PAPERCLIP_AGENT_ID;
-  const heartbeatRunId = process.env.PAPERCLIP_HEARTBEAT_RUN_ID;
+
+  // Phase A5: Accept both PAPERCLIP_RUN_ID and PAPERCLIP_HEARTBEAT_RUN_ID
+  const heartbeatRunId =
+    process.env.PAPERCLIP_RUN_ID ||
+    process.env.PAPERCLIP_HEARTBEAT_RUN_ID ||
+    undefined;
 
   if (!companyId) {
     throw new Error("Missing PAPERCLIP_COMPANY_ID — required for company-scoped API calls");
@@ -106,7 +157,26 @@ function extractPaperclipEnv(): PaperclipEnv {
     throw new Error("Missing PAPERCLIP_AGENT_ID — required to identify the agent");
   }
 
-  return { agentApiKey, url, companyId, agentId, heartbeatRunId };
+  // Phase A3: Wake context env vars
+  const linkedIssueIdsRaw = process.env.PAPERCLIP_LINKED_ISSUE_IDS;
+
+  return {
+    agentApiKey,
+    url,
+    companyId,
+    agentId,
+    heartbeatRunId,
+
+    // Wake context
+    taskId: process.env.PAPERCLIP_TASK_ID || undefined,
+    wakeReason: process.env.PAPERCLIP_WAKE_REASON || undefined,
+    wakeCommentId: process.env.PAPERCLIP_WAKE_COMMENT_ID || undefined,
+    approvalId: process.env.PAPERCLIP_APPROVAL_ID || undefined,
+    approvalStatus: process.env.PAPERCLIP_APPROVAL_STATUS || undefined,
+    linkedIssueIds: linkedIssueIdsRaw
+      ? linkedIssueIdsRaw.split(",").filter(Boolean)
+      : undefined,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -128,9 +198,9 @@ function extractPaperclipEnv(): PaperclipEnv {
 function resolveSkillDirectories(mapping: RoleMappingEntry, projectRoot: string): string[] {
   const dirs: string[] = [];
 
-  // 1. Agent-specific BMAD skills (from skills/ directory in project root)
+  // 1. Agent-specific BMAD skills (from _bmad/skills/ directory)
   for (const skillName of mapping.bmadSkills) {
-    const skillDir = resolve(projectRoot, "skills", skillName);
+    const skillDir = resolve(projectRoot, "_bmad/skills", skillName);
     if (existsSync(skillDir)) {
       dirs.push(skillDir);
     } else {
@@ -224,7 +294,7 @@ interface AgentConfigFiles {
  * Load the 4-file agent configuration set from disk.
  *
  * Reads AGENTS.md, SOUL.md, HEARTBEAT.md, TOOLS.md from the
- * `agents/{agentConfigDir}/` directory. These are injected as the
+ * `_bmad/agents/{agentConfigDir}/` directory. These are injected as the
  * system message for the Copilot SDK session, giving the agent its
  * identity, persona, heartbeat protocol, and tool awareness.
  *
@@ -233,7 +303,7 @@ interface AgentConfigFiles {
  * @returns The 4-file content, or null if the config dir doesn't exist
  */
 function loadAgentConfigFiles(mapping: RoleMappingEntry, projectRoot: string): AgentConfigFiles | null {
-  const configDir = resolve(projectRoot, "agents", mapping.agentConfigDir);
+  const configDir = resolve(projectRoot, "_bmad/agents", mapping.agentConfigDir);
 
   if (!existsSync(configDir)) {
     log.warn("Agent config directory not found", {
@@ -328,6 +398,9 @@ async function main(): Promise<void> {
     url: env.url,
     companyId: env.companyId,
     heartbeatRunId: env.heartbeatRunId ?? "n/a",
+    wakeReason: env.wakeReason ?? "none",
+    taskId: env.taskId ?? "none",
+    approvalId: env.approvalId ?? "none",
   });
 
   // ── Step 2: Create Paperclip client ──────────────────────────────────
@@ -341,11 +414,13 @@ async function main(): Promise<void> {
   const paperclipClient = new PaperclipClient({
     baseUrl: env.url,
     agentApiKey: useAgentKey ? env.agentApiKey : undefined,
+    agentId: env.agentId,
     companyId: env.companyId,
-    // Only send heartbeat run ID when Paperclip created the run (non-local_trusted).
-    // In local_trusted mode with manual invocation, the run ID doesn't exist in the
-    // heartbeat_runs table, causing FK constraint violations on activity_log writes.
-    heartbeatRunId: useAgentKey ? env.heartbeatRunId : undefined,
+    // Phase A6: Always send heartbeat run ID when available, regardless of auth mode.
+    // The run ID enables audit trail correlation across all API calls.
+    // In local_trusted mode with MANUAL invocation (e.g., scripts), the env var
+    // won't be set, so this naturally becomes undefined (no header sent).
+    heartbeatRunId: env.heartbeatRunId,
   });
 
   log.info("Paperclip client created", {
@@ -406,10 +481,14 @@ async function main(): Promise<void> {
   // In board-access mode, /agents/me/inbox-lite doesn't work (no agent key).
   // Use listIssues with assignee filter instead.
   // Filter to actionable statuses only — skip done/cancelled issues.
-  // For orchestrator (CEO): also skip in_progress — that means delegation
-  // already happened and sub-tasks are being worked on.
+  //
+  // NOTE: We do NOT skip in_progress for the orchestrator here. Paperclip's
+  // /heartbeat/invoke automatically checks out the triggered issue (setting
+  // it to in_progress) before our entrypoint runs. If we skipped in_progress,
+  // the CEO would never process any invoked work. Instead, the delegation
+  // dedup guard in Step 8 (checking for existing child sub-issues) prevents
+  // double-delegation.
   const TERMINAL_STATUSES = new Set(["done", "cancelled"]);
-  const SKIP_FOR_ORCHESTRATOR = new Set(["done", "cancelled", "in_progress"]);
   let inbox: PaperclipIssue[];
   try {
     const { value } = await withRetry(
@@ -417,17 +496,78 @@ async function main(): Promise<void> {
         if (useAgentKey) {
           return paperclipClient.getAgentInbox();
         }
-        const skipSet = mapping.isOrchestrator ? SKIP_FOR_ORCHESTRATOR : TERMINAL_STATUSES;
         const allIssues = await paperclipClient.listIssues({ assigneeAgentId: env.agentId });
-        return allIssues.filter((i) => !skipSet.has(i.status));
+        return allIssues.filter((i) => !TERMINAL_STATUSES.has(i.status));
       },
       { maxAttempts: 3, label: "check-inbox", isRetryable: isPaperclipRetryable },
     );
     inbox = value;
     log.info("Inbox checked", { issueCount: inbox.length });
+
+    // Heartbeat Protocol Step 4: "Work on in_progress first, then todo.
+    // Skip blocked unless you can unblock it." Paperclip returns results
+    // sorted by priority, but we additionally sort by status so in_progress
+    // issues are processed before todo/backlog.
+    const STATUS_PRIORITY: Record<string, number> = {
+      in_progress: 0,
+      in_review: 1,
+      todo: 2,
+      backlog: 3,
+      blocked: 4,
+    };
+    inbox.sort((a, b) => {
+      const ap = STATUS_PRIORITY[a.status] ?? 5;
+      const bp = STATUS_PRIORITY[b.status] ?? 5;
+      return ap - bp;
+    });
   } catch (err) {
     log.error("Failed to check inbox", {}, err instanceof Error ? err : undefined);
     process.exit(1);
+  }
+
+  // ── Step 5a: Approval follow-up (Phase A4) ─────────────────────────
+  // If this heartbeat was triggered for an approval, handle it and exit.
+  if (env.approvalId) {
+    log.info("Handling approval wake", {
+      approvalId: env.approvalId,
+      approvalStatus: env.approvalStatus ?? "unknown",
+    });
+    // Approval handling is a dedicated heartbeat — report result and exit.
+    // The approval is logged; the related task will be picked up on the next
+    // regular heartbeat via the inbox.
+    try {
+      if (env.taskId) {
+        await paperclipClient.addIssueComment(
+          env.taskId,
+          `🔔 **Approval received** — ID: \`${env.approvalId}\`, Status: **${env.approvalStatus ?? "unknown"}**`,
+        );
+      }
+    } catch (approvalErr) {
+      log.warn("Failed to post approval notification", {
+        error: approvalErr instanceof Error ? approvalErr.message : String(approvalErr),
+      });
+    }
+    // Don't exit early — let the triggered task be processed below
+    // (the approval context will inform the agent's behavior)
+  }
+
+  // ── Step 5b: Prioritize triggered task (Phase A4) ──────────────────
+  // If PAPERCLIP_TASK_ID is set, move the triggered task to the front
+  // of the queue so it's processed first.
+  if (env.taskId && inbox.length > 1) {
+    const triggeredIdx = inbox.findIndex((i) => i.id === env.taskId);
+    if (triggeredIdx > 0) {
+      const [triggered] = inbox.splice(triggeredIdx, 1);
+      inbox.unshift(triggered);
+      log.info("Prioritized triggered task to front of inbox", {
+        taskId: env.taskId,
+        wakeReason: env.wakeReason ?? "unknown",
+      });
+    } else if (triggeredIdx === -1) {
+      log.warn("Triggered task not found in inbox — it may have been resolved or reassigned", {
+        taskId: env.taskId,
+      });
+    }
   }
 
   if (inbox.length === 0) {
@@ -473,6 +613,8 @@ async function main(): Promise<void> {
   const dispatcher = new AgentDispatcher(sessionManager, config, costTracker);
 
   // ── Step 8: Process each assigned issue ─────────────────────────────
+  // Phase A2: Checkout before work, release on error.
+  // Paperclip SKILL.md Step 5: "You MUST checkout before doing any work."
   const bmadRole = mapping.bmadAgentName ?? "ceo";
 
   for (const issue of inbox) {
@@ -482,18 +624,69 @@ async function main(): Promise<void> {
       storyId: issue.storyId ?? "n/a",
     });
 
+    // ── Phase A7: Blocked-task dedup ──────────────────────────────────
+    // Before re-engaging a blocked task, check if our last comment was a
+    // blocked-status update AND no new comments from other agents since.
+    if (issue.status === "blocked") {
+      try {
+        const comments = await paperclipClient.getIssueComments(issue.id, { order: "asc" });
+        const lastComment = comments.length > 0 ? comments[comments.length - 1] : null;
+        if (lastComment?.authorId === env.agentId && isBlockedStatusComment(lastComment.body)) {
+          log.info("Skipping blocked task — no new context since our last blocked update", {
+            issueId: issue.id,
+            lastCommentId: lastComment.id,
+          });
+          continue;
+        }
+      } catch (dedupErr) {
+        // Non-fatal: if we can't check dedup, proceed with normal processing
+        log.warn("Blocked-task dedup check failed, proceeding", {
+          issueId: issue.id,
+          error: dedupErr instanceof Error ? dedupErr.message : String(dedupErr),
+        });
+      }
+    }
+
+    // ── Phase A2: Checkout issue before processing ────────────────────
+    // Prevents concurrent agents from processing the same issue.
+    // expectedStatuses per Paperclip docs: checkout accepts issues in
+    // todo, backlog, or blocked. in_progress is included for the case
+    // where Paperclip's invoke already set executionRunId (our checkout
+    // 409-fallback recognizes we own it via assigneeAgentId).
+    let lockedIssue: PaperclipIssue | null;
+    try {
+      lockedIssue = await paperclipClient.checkoutIssue(
+        issue.id,
+        ["todo", "backlog", "in_progress", "blocked"],
+      );
+    } catch (checkoutErr) {
+      log.error("Checkout failed for issue", {
+        issueId: issue.id,
+        error: checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr),
+      });
+      continue;
+    }
+
+    if (!lockedIssue) {
+      // 409 — another agent already has this task checked out
+      log.info("Skipping issue — already checked out by another agent", {
+        issueId: issue.id,
+      });
+      continue;
+    }
+
     try {
       if (mapping.isOrchestrator) {
         // ── Guard: skip if CEO already delegated this issue ────────────
         // Defense-in-depth: if sub-issues exist, another heartbeat already
         // ran delegation. Skip to avoid duplicates.
-        const existingChildren = await paperclipClient.listIssues({ parentId: issue.id });
+        const existingChildren = await paperclipClient.listIssues({ parentId: lockedIssue.id });
         const activeChildren = existingChildren.filter(
           (c) => c.status !== "cancelled",
         );
         if (activeChildren.length > 0) {
           log.info("Skipping already-delegated issue (has active sub-issues)", {
-            issueId: issue.id,
+            issueId: lockedIssue.id,
             childCount: activeChildren.length,
           });
           continue;
@@ -502,7 +695,7 @@ async function main(): Promise<void> {
         // CEO orchestrator: use Copilot SDK session to analyze issue,
         // produce a structured delegation plan, and create sub-issues
         const result = await orchestrateCeoIssue(
-          issue,
+          lockedIssue,
           agentSelf,
           paperclipClient,
           reporter,
@@ -512,21 +705,33 @@ async function main(): Promise<void> {
           costTracker,
         );
         log.info("CEO orchestration result", {
-          issueId: issue.id,
+          issueId: lockedIssue.id,
           success: result.success,
           subtasksCreated: result.subtasksCreated,
         });
       } else {
         // Domain agent: process the issue directly
-        await handlePaperclipIssue(issue, env.agentId, bmadRole, dispatcher, reporter);
+        await handlePaperclipIssue(lockedIssue, env.agentId, bmadRole, dispatcher, reporter);
       }
+      // On success: don't release — checkout holds until status change
     } catch (err) {
-      log.error("Failed to process issue", { issueId: issue.id }, err instanceof Error ? err : undefined);
+      log.error("Failed to process issue", { issueId: lockedIssue.id }, err instanceof Error ? err : undefined);
+
+      // Phase A2: Release checkout lock on failure
+      try {
+        await paperclipClient.releaseIssue(lockedIssue.id);
+        log.info("Released checkout lock after failure", { issueId: lockedIssue.id });
+      } catch (releaseErr) {
+        log.warn("Failed to release issue checkout", {
+          issueId: lockedIssue.id,
+          error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr),
+        });
+      }
 
       // Report failure back to Paperclip
       try {
         await paperclipClient.addIssueComment(
-          issue.id,
+          lockedIssue.id,
           `❌ **FAILED** — ${mapping.displayName} encountered an error: ${err instanceof Error ? err.message : String(err)}`,
         );
       } catch (reportErr) {
@@ -580,24 +785,10 @@ async function main(): Promise<void> {
     log.info("Cost events posted to Paperclip", { count: costEventsPosted });
   }
 
-  // 9b. Post human-readable cost summary as issue comment
-  if (firstIssue) {
-    try {
-      const costMarkdown = costSummary.interactionCount > 0
-        ? costTracker.formatSummaryMarkdown()
-        : [
-            "📊 **Cost Tracker** — No LLM interactions recorded",
-            "",
-            "The heartbeat completed without any tracked LLM calls.",
-            `This may indicate the agent used a code path that bypasses the dispatcher.`,
-          ].join("\n");
-      await paperclipClient.addIssueComment(firstIssue.id, costMarkdown);
-    } catch (costReportErr) {
-      log.warn("Failed to post cost summary comment to Paperclip", {
-        error: costReportErr instanceof Error ? costReportErr.message : String(costReportErr),
-      });
-    }
-  }
+  // NOTE: Cost tracking is reported exclusively via Paperclip's native
+  // cost-events API (Step 9a above). We do NOT post cost summary comments
+  // to issues — the /costs dashboard is the single source of truth for
+  // spend analytics, budget enforcement, and per-agent cost breakdowns.
 
   // ── Step 10: Cleanup ────────────────────────────────────────────────
   await sessionManager.stop();

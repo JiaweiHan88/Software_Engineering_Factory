@@ -20,7 +20,7 @@ export interface RoleMappingEntry {
   displayName: string;
   /** Whether this role orchestrates (delegates) rather than does domain work */
   isOrchestrator: boolean;
-  /** Directory name under agents/ containing the 4-file config set */
+  /** Directory name under _bmad/agents/ containing the 4-file config set */
   agentConfigDir: string;
   /** BMAD skill directories this role should have loaded */
   bmadSkills: string[];
@@ -38,8 +38,19 @@ export interface RoleMappingEntry {
  */
 export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
   // ─── CEO (Orchestrator) ──────────────────────────────────────────────
-  ceo: {
+  "ceo": {
     bmadAgentName: null, // CEO has no BMAD persona — it orchestrates
+    displayName: "CEO - Chief Executive",
+    isOrchestrator: true,
+    agentConfigDir: "ceo",
+    bmadSkills: [
+      "bmad-help",
+    ],
+    tools: ["sprint_status"],
+  },
+  // Alias: metadata.bmadRole = "bmad-ceo"
+  "bmad-ceo": {
+    bmadAgentName: null,
     displayName: "CEO - Chief Executive",
     isOrchestrator: true,
     agentConfigDir: "ceo",
@@ -197,6 +208,21 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     ],
     tools: ["dev_story", "create_story", "code_review", "sprint_status"],
   },
+  // Alias: metadata.bmadRole = "bmad-quick-flow"
+  "bmad-quick-flow": {
+    bmadAgentName: "bmad-quick-flow-solo-dev",
+    displayName: "Barry - QuickFlow",
+    isOrchestrator: false,
+    agentConfigDir: "quick-flow",
+    bmadSkills: [
+      "bmad-quick-flow-solo-dev",
+      "bmad-dev-story",
+      "bmad-quick-dev",
+      "bmad-create-story",
+      "bmad-code-review",
+    ],
+    tools: ["dev_story", "create_story", "code_review", "sprint_status"],
+  },
 };
 
 /**
@@ -226,20 +252,34 @@ export function resolveRoleMapping(agent: {
   title?: string | null;
   metadata?: Record<string, unknown> | null;
 }): RoleMappingEntry | null {
+  // Helper: case-insensitive lookup against ROLE_MAPPING keys
+  const lookup = (key: string): RoleMappingEntry | undefined =>
+    ROLE_MAPPING[key] ?? ROLE_MAPPING[key.toLowerCase()];
+
   // 1. Explicit bmadRole in metadata
   const bmadRole = agent.metadata?.bmadRole as string | undefined;
-  if (bmadRole && ROLE_MAPPING[bmadRole]) {
-    return ROLE_MAPPING[bmadRole];
+  if (bmadRole) {
+    const entry = lookup(bmadRole);
+    if (entry) return entry;
   }
 
-  // 2. Title field (often set to "bmad-dev", "bmad-pm", etc.)
-  if (agent.title && ROLE_MAPPING[agent.title]) {
-    return ROLE_MAPPING[agent.title];
+  // 2. Agent name in metadata (fallback from bmadRole)
+  const agentName = agent.metadata?.agentName as string | undefined;
+  if (agentName) {
+    const entry = lookup(agentName);
+    if (entry) return entry;
   }
 
-  // 3. Paperclip role
-  if (ROLE_MAPPING[agent.role]) {
-    return ROLE_MAPPING[agent.role];
+  // 3. Title field (often set to "bmad-dev", "bmad-pm", etc.)
+  if (agent.title) {
+    const entry = lookup(agent.title);
+    if (entry) return entry;
+  }
+
+  // 4. Paperclip role
+  if (agent.role) {
+    const entry = lookup(agent.role);
+    if (entry) return entry;
   }
 
   return null;

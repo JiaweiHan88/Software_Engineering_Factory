@@ -119,6 +119,10 @@ if [ "$FLAG_CLEAN" = true ]; then
       ok "Cleared PAPERCLIP_COMPANY_ID in .env"
     fi
   fi
+
+  # Also unset from shell env (was loaded by .env sourcing above)
+  unset PAPERCLIP_COMPANY_ID
+  ok "Unset PAPERCLIP_COMPANY_ID from environment"
 else
   info "Step 2: Skip clean (use --clean to wipe DB)"
 fi

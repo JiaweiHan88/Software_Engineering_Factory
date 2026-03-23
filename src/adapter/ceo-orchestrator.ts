@@ -32,6 +32,7 @@ import type { SessionManager } from "./session-manager.js";
 import type { BmadConfig } from "../config/config.js";
 import type { RoleMappingEntry } from "../config/role-mapping.js";
 import type { CostTracker } from "../observability/cost-tracker.js";
+import { resolveModel, loadModelStrategyConfig } from "../config/model-strategy.js";
 import { getAgent, allAgents } from "../agents/registry.js";
 import { allTools } from "../tools/index.js";
 import { Logger } from "../observability/logger.js";
@@ -434,13 +435,23 @@ export async function orchestrateCeoIssue(
     prompt: "You are the CEO of the BMAD Copilot Factory. You delegate, you do not do domain work.",
   };
 
+  // Resolve model via strategy (CEO = powerful tier for strategic reasoning)
+  const modelStrategy = loadModelStrategyConfig();
+  const modelSelection = resolveModel("ceo-delegation", {}, modelStrategy);
+  const ceoModel = modelSelection.model;
+  log.info("CEO delegation model resolved", {
+    model: ceoModel,
+    tier: modelSelection.tier,
+    reason: modelSelection.reason,
+  });
+
   let sessionId: string;
   try {
     sessionId = await sessionManager.createAgentSession({
       agent: ceoAgentDef,
       allAgents,
       tools: allTools,
-      model: config.model,
+      model: ceoModel,
       systemMessage: config.agentSystemMessage,
     });
   } catch (err) {
@@ -473,10 +484,10 @@ export async function orchestrateCeoIssue(
   if (costTracker) {
     costTracker.recordUsage(
       "ceo",
-      config.model ?? "default",
+      ceoModel,
       prompt,
       response,
-      { sessionId, phase: "ceo-delegation" },
+      { sessionId, phase: "ceo-delegation", issueId: issue.id },
     );
   }
 
@@ -527,7 +538,7 @@ export async function orchestrateCeoIssue(
   // Tasks with dependsOn: [] get status "todo" → triggers immediate agent wakeup.
   // Tasks with dependsOn: [n, ...] get status "backlog" → held until CEO promotes.
   let subtasksCreated = 0;
-  const createdIssueIds: string[] = [];
+  const createdIssues: Array<{ id: string; identifier?: string }> = [];
 
   for (let taskIdx = 0; taskIdx < plan.tasks.length; taskIdx++) {
     const task = plan.tasks[taskIdx];
@@ -593,11 +604,12 @@ export async function orchestrateCeoIssue(
         });
       }
 
-      createdIssueIds.push(subIssue.id);
+      createdIssues.push({ id: subIssue.id, identifier: subIssue.identifier });
       subtasksCreated++;
 
       log.info("Sub-issue created", {
         subIssueId: subIssue.id,
+        identifier: subIssue.identifier ?? "unknown",
         title: task.title,
         assignTo: task.assignTo,
         assigneeId: assigneeId ?? "unassigned",
@@ -629,7 +641,7 @@ export async function orchestrateCeoIssue(
             } catch {
               // Non-critical
             }
-            createdIssueIds.push(phantom.id);
+            createdIssues.push({ id: phantom.id, identifier: phantom.identifier });
             subtasksCreated++;
             continue;
           }
@@ -652,8 +664,8 @@ export async function orchestrateCeoIssue(
       } catch {
         // Don't cascade errors
       }
-      // Push empty string so task indices stay aligned with createdIssueIds
-      createdIssueIds.push("");
+      // Push empty entry so task indices stay aligned with createdIssues
+      createdIssues.push({ id: "" });
     }
   }
 
@@ -672,12 +684,16 @@ export async function orchestrateCeoIssue(
 
   for (let i = 0; i < plan.tasks.length; i++) {
     const task = plan.tasks[i];
-    const issueId = createdIssueIds[i];
+    const created = createdIssues[i];
+    const label = created?.identifier ?? created?.id?.slice(0, 8) ?? `task-${i}`;
     const depsInfo = task.dependsOn.length > 0
-      ? ` ⏳ depends on: ${task.dependsOn.map((d) => `#${d}`).join(", ")}`
+      ? ` ⏳ depends on: ${task.dependsOn.map((d) => {
+          const dep = createdIssues[d];
+          return dep?.identifier ?? `task-${d}`;
+        }).join(", ")}`
       : " ▶️ ready";
-    const status = issueId ? `✅ created` : "❌ failed";
-    summaryLines.push(`${i}. **[${task.phase}]** ${task.title} → ${task.assignTo} — ${status}${depsInfo}`);
+    const status = created?.id ? `✅ ${label}` : "❌ failed";
+    summaryLines.push(`${i + 1}. **[${task.phase}]** ${task.title} → ${task.assignTo} — ${status}${depsInfo}`);
   }
 
   summaryLines.push(
@@ -951,13 +967,18 @@ export async function reEvaluateDelegation(
     prompt: "You are the CEO. You orchestrate, not execute.",
   };
 
+  // Resolve model via strategy (re-eval = standard tier)
+  const reEvalStrategy = loadModelStrategyConfig();
+  const reEvalModel = resolveModel("ceo-reeval", {}, reEvalStrategy);
+  const reEvalModelId = reEvalModel.model;
+
   let sessionId: string;
   try {
     sessionId = await sessionManager.createAgentSession({
       agent: ceoAgentDef,
       allAgents,
       tools: allTools,
-      model: config.model,
+      model: reEvalModelId,
       systemMessage: config.agentSystemMessage,
     });
   } catch (err) {
@@ -978,8 +999,9 @@ export async function reEvaluateDelegation(
   await sessionManager.closeSession(sessionId);
 
   if (costTracker) {
-    costTracker.recordUsage("ceo", config.model ?? "default", prompt, response, {
+    costTracker.recordUsage("ceo", reEvalModelId, prompt, response, {
       phase: "ceo-reeval",
+      issueId: parentIssue.id,
     });
   }
 

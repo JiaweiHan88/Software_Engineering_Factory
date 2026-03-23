@@ -71,7 +71,10 @@ export type WorkPhase =
   // ── Review phase (extensions) ─────────────────────────────────────
   | "editorial-review"
   // ── Generic delegated work ────────────────────────────────────────
-  | "delegated-task";
+  | "delegated-task"
+  // ── CEO orchestration phases ──────────────────────────────────────
+  | "ceo-delegation"
+  | "ceo-reeval";
 
 /**
  * A work item to dispatch to an agent.
@@ -402,6 +405,21 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
         item.extraContext ? `\n## Additional Context\n${item.extraContext}` : "",
       ].filter(Boolean).join("\n"),
     },
+
+    // CEO phases — not dispatched via AgentDispatcher but registered
+    // so WorkPhase → PhaseConfig map is complete for model-strategy.
+    "ceo-delegation": {
+      agentName: "ceo",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: allTools as Tool<any>[],
+      buildPrompt: () => "(CEO delegation — handled by ceo-orchestrator)",
+    },
+    "ceo-reeval": {
+      agentName: "ceo",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: allTools as Tool<any>[],
+      buildPrompt: () => "(CEO re-evaluation — handled by ceo-orchestrator)",
+    },
   };
 }
 
@@ -518,7 +536,7 @@ export class AgentDispatcher {
               modelSelection.model,
               prompt,
               response,
-              { sessionId, phase: item.phase },
+              { sessionId, phase: item.phase, issueId: item.id },
             );
           }
 

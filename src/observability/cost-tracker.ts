@@ -47,6 +47,8 @@ export interface UsageRecord {
   sessionId?: string;
   /** Optional work phase for categorization */
   phase?: string;
+  /** Optional issue ID for per-ticket cost attribution */
+  issueId?: string;
 }
 
 /**
@@ -231,7 +233,7 @@ export class CostTracker {
     model: string,
     prompt: string,
     response: string,
-    opts?: { sessionId?: string; phase?: string },
+    opts?: { sessionId?: string; phase?: string; issueId?: string },
   ): void {
     const inputTokens = estimateTokens(prompt);
     const outputTokens = estimateTokens(response);
@@ -246,6 +248,7 @@ export class CostTracker {
       timestamp: new Date().toISOString(),
       sessionId: opts?.sessionId,
       phase: opts?.phase,
+      issueId: opts?.issueId,
     };
 
     this.records.push(record);

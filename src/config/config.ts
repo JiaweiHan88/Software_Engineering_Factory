@@ -90,7 +90,7 @@ export interface BmadConfig {
   projectRoot: string;
   /**
    * Target project root — the workspace that agents operate in.
-   * Defaults to projectRoot if TARGET_PROJECT_ROOT is not set.
+   * Resolution order: PAPERCLIP_WORKSPACE_CWD → TARGET_PROJECT_ROOT → projectRoot.
    * Set this to a separate clean workspace to prevent agents from
    * exploring the factory source files (50–100s savings per dispatch).
    */
@@ -116,9 +116,15 @@ export interface BmadConfig {
  */
 export function loadConfig(projectRoot?: string): BmadConfig {
   const root = projectRoot ?? process.cwd();
-  const targetRoot = process.env.TARGET_PROJECT_ROOT
-    ? resolve(root, process.env.TARGET_PROJECT_ROOT)
-    : root;
+  // Workspace CWD resolution: Paperclip's workspace runtime injects
+  // PAPERCLIP_WORKSPACE_CWD (aa27db4 parity), falling back to the legacy
+  // TARGET_PROJECT_ROOT from .env, then the factory root itself.
+  const workspaceCwd = process.env.PAPERCLIP_WORKSPACE_CWD;
+  const targetRoot = workspaceCwd
+    ? resolve(workspaceCwd)
+    : process.env.TARGET_PROJECT_ROOT
+      ? resolve(root, process.env.TARGET_PROJECT_ROOT)
+      : root;
 
   // When a target workspace is set, sprint data lives there, not in the factory
   const dataRoot = targetRoot;

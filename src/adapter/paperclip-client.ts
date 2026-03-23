@@ -43,6 +43,8 @@ export interface PaperclipAgent {
 /** Paperclip issue record — matches real `/api/issues/:id` shape. */
 export interface PaperclipIssue {
   id: string;
+  /** Human-readable identifier (e.g., "BMA-3"). Auto-assigned by Paperclip. */
+  identifier?: string;
   title: string;
   description: string;
   status: string;

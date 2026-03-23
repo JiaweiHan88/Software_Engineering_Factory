@@ -225,7 +225,10 @@ export class PaperclipReporter {
       return [
         `📁 **Workspace Artifacts** (\`${this.workspaceDir}\`):`,
         "",
-        ...files.map((f) => `- \`${f.name}\` (${f.sizeKb} KB) — ${f.preview}`),
+        // Format: `filename` | 42 KB — preview
+        // Avoid parenthesized decimal sizes like "(41.2 KB)" because Paperclip's
+        // file browser plugin regex matches "41.2" as a file path with extension ".2".
+        ...files.map((f) => `- \`${f.name}\` | ${Math.round(parseFloat(f.sizeKb))} KB — ${f.preview}`),
       ].join("\n");
     } catch {
       return undefined;
@@ -292,38 +295,37 @@ export class PaperclipReporter {
   }
 
   /**
-   * If the completed issue is a sub-issue (has a parentId), wake the parent
-   * issue's assignee so it can re-evaluate dependencies and promote the next
-   * wave of tasks. This is the mechanism that keeps the CEO in the loop after
-   * each specialist finishes.
+   * Signal completion to the parent issue's assignee so it can re-evaluate
+   * dependencies and promote the next wave of backlog tasks.
    *
-   * Silently logs and returns on any failure — wakeup is best-effort.
+   * Strategy: post a brief completion comment on the **parent** issue.
+   * Paperclip auto-wakes the parent's assignee when a child issue moves
+   * to "done" (child_issue_done trigger), so the comment is purely
+   * informational for the audit trail. The actual wake is server-side.
+   *
+   * Silently logs and returns on any failure — notification is best-effort.
    */
   private async wakeParentAssignee(issueId: string): Promise<void> {
     try {
       const issue = await this.client.getIssue(issueId);
       if (!issue.parentId) {
-        return; // Not a sub-issue — nothing to wake
+        return; // Not a sub-issue — nothing to notify
       }
 
-      const parent = await this.client.getIssue(issue.parentId);
-      if (!parent.assigneeAgentId) {
-        log.warn("Parent issue has no assignee, cannot wake", {
-          issueId,
-          parentId: issue.parentId,
-        });
-        return;
-      }
-
-      await this.client.wakeAgent(parent.assigneeAgentId);
-      log.info("Woke parent assignee for re-evaluation", {
+      // Post a brief completion notice on the parent issue for audit trail.
+      // Paperclip's child_issue_done trigger handles the actual agent wake.
+      const identifier = issue.identifier ?? issue.id.slice(0, 8);
+      await this.client.addIssueComment(
+        issue.parentId,
+        `📋 Sub-task **${identifier}** ("${issue.title.slice(0, 60)}") completed.`,
+      );
+      log.info("Posted completion notice on parent issue", {
         issueId,
         parentId: issue.parentId,
-        parentAssigneeId: parent.assigneeAgentId,
       });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      log.warn("Failed to wake parent assignee (non-fatal)", {
+      log.warn("Failed to notify parent issue (non-fatal)", {
         issueId,
         error: errorMsg,
       });

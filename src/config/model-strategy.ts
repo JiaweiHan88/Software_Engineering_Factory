@@ -124,6 +124,9 @@ const PHASE_TIER_MAP: Record<WorkPhase, ModelTier> = {
   "editorial-review": "fast",
   // Generic delegated work
   "delegated-task": "standard",
+  // CEO orchestration (strategic reasoning needs powerful tier)
+  "ceo-delegation": "powerful",
+  "ceo-reeval": "standard",
 };
 
 /**

@@ -21,11 +21,12 @@
  * - PAPERCLIP_COMPANY_ID — Company ID for scoping
  * - PAPERCLIP_AGENT_ID — This agent's UUID
  * - PAPERCLIP_HEARTBEAT_RUN_ID — Current heartbeat run ID (for transcripts)
+ * - PAPERCLIP_WORKSPACE_CWD — Resolved workspace directory (aa27db4 parity)
  *
  * Additional env (from .env or inherited):
  * - COPILOT_GHE_HOST — GHE hostname for Copilot SDK
  * - COPILOT_MODEL — Default model override
- * - TARGET_PROJECT_ROOT — Workspace for agents to operate in
+ * - TARGET_PROJECT_ROOT — Workspace for agents to operate in (fallback when PAPERCLIP_WORKSPACE_CWD not set)
  *
  * @module heartbeat-entrypoint
  */
@@ -87,16 +88,17 @@ function isBlockedStatusComment(body: string): boolean {
  * Environment variables injected by Paperclip's process adapter.
  *
  * The process adapter injects via `buildPaperclipEnv()`:
- *   PAPERCLIP_AGENT_ID, PAPERCLIP_COMPANY_ID, PAPERCLIP_API_URL
+ *   PAPERCLIP_AGENT_ID, PAPERCLIP_COMPANY_ID, PAPERCLIP_API_URL, PAPERCLIP_API_KEY
  *
- * It does NOT inject PAPERCLIP_AGENT_API_KEY — that's only used by
- * standalone polling mode. In process adapter mode, auth is handled
- * by Paperclip's deployment mode (local_trusted = board access).
+ * PAPERCLIP_API_KEY is a JWT that encodes the agent's identity.
+ * Using it as a Bearer token ensures all API calls (comments, checkouts,
+ * cost events) are attributed to the agent rather than the board user.
  *
  * Phase A3: Extended with full wake context env vars from Paperclip SKILL.md.
+ * Parity: Extended with workspace context env vars from Paperclip execute.ts (aa27db4).
  */
 interface PaperclipEnv {
-  /** Agent API key for Bearer auth (optional — not set by process adapter) */
+  /** Agent API key (JWT) for Bearer auth — injected by process adapter as PAPERCLIP_API_KEY */
   agentApiKey: string | undefined;
   /** Paperclip server URL */
   url: string;
@@ -121,6 +123,25 @@ interface PaperclipEnv {
   approvalStatus: string | undefined;
   /** Comma-separated linked issue IDs (parsed into array) */
   linkedIssueIds: string[] | undefined;
+
+  // ── Workspace Context (Parity with execute.ts aa27db4) ────────────
+
+  /** Resolved workspace CWD — canonical working directory for this agent run */
+  workspaceCwd: string | undefined;
+  /** Workspace source: project_primary | task_session | agent_home */
+  workspaceSource: string | undefined;
+  /** Workspace strategy: per_task | shared | etc. */
+  workspaceStrategy: string | undefined;
+  /** Workspace ID (Paperclip-managed workspace identity) */
+  workspaceId: string | undefined;
+  /** Git repo URL for workspace */
+  workspaceRepoUrl: string | undefined;
+  /** Git ref for workspace */
+  workspaceRepoRef: string | undefined;
+  /** Git branch name */
+  workspaceBranch: string | undefined;
+  /** Git worktree path (if using worktree strategy) */
+  workspaceWorktreePath: string | undefined;
 }
 
 /**
@@ -135,9 +156,14 @@ interface PaperclipEnv {
  * @throws Error if required env vars are missing
  */
 function extractPaperclipEnv(): PaperclipEnv {
-  // Agent API key is optional — process adapter doesn't inject it,
-  // but standalone polling mode (or .env) might set it
-  const agentApiKey = process.env.PAPERCLIP_AGENT_API_KEY || undefined;
+  // Agent API key: Paperclip's process adapter injects PAPERCLIP_API_KEY (JWT)
+  // with the agent's identity. This is a per-agent, per-run token.
+  //
+  // IMPORTANT: Do NOT fall back to PAPERCLIP_AGENT_API_KEY here.
+  // That's a static shared key from .env loaded by dotenv into ALL heartbeat
+  // processes — using it would make all agents authenticate as the same agent,
+  // causing wrong comment attribution and potential 401 errors.
+  const agentApiKey = process.env.PAPERCLIP_API_KEY || undefined;
 
   // Process adapter sets PAPERCLIP_API_URL; .env may set PAPERCLIP_URL
   const url = process.env.PAPERCLIP_API_URL || process.env.PAPERCLIP_URL || "http://localhost:3100";
@@ -178,6 +204,16 @@ function extractPaperclipEnv(): PaperclipEnv {
     linkedIssueIds: linkedIssueIdsRaw
       ? linkedIssueIdsRaw.split(",").filter(Boolean)
       : undefined,
+
+    // Workspace context (parity with execute.ts aa27db4)
+    workspaceCwd: process.env.PAPERCLIP_WORKSPACE_CWD || undefined,
+    workspaceSource: process.env.PAPERCLIP_WORKSPACE_SOURCE || undefined,
+    workspaceStrategy: process.env.PAPERCLIP_WORKSPACE_STRATEGY || undefined,
+    workspaceId: process.env.PAPERCLIP_WORKSPACE_ID || undefined,
+    workspaceRepoUrl: process.env.PAPERCLIP_WORKSPACE_REPO_URL || undefined,
+    workspaceRepoRef: process.env.PAPERCLIP_WORKSPACE_REPO_REF || undefined,
+    workspaceBranch: process.env.PAPERCLIP_WORKSPACE_BRANCH || undefined,
+    workspaceWorktreePath: process.env.PAPERCLIP_WORKSPACE_WORKTREE_PATH || undefined,
   };
 }
 
@@ -421,12 +457,13 @@ async function main(): Promise<void> {
   }
 
   // ── Step 2: Create Paperclip client ──────────────────────────────────
-  // In local_trusted mode (process adapter), we use board-level access
-  // (no auth header). Agent API keys are per-agent and using a mismatched
-  // key causes ownership conflicts. Only send the agent API key in
-  // authenticated mode where each agent has its own key.
+  // Always use agent API key when available — the JWT encodes the agent's
+  // identity so Paperclip attributes comments, checkouts, and cost events
+  // to the correct agent. Without it, all actions appear as "board" user.
+  // In local_trusted mode the auth middleware accepts both JWT and no-auth,
+  // so sending the key never causes ownership conflicts.
   const deploymentMode = process.env.PAPERCLIP_DEPLOYMENT_MODE;
-  const useAgentKey = deploymentMode !== "local_trusted" && !!env.agentApiKey;
+  const useAgentKey = !!env.agentApiKey;
 
   const paperclipClient = new PaperclipClient({
     baseUrl: env.url,
@@ -445,7 +482,20 @@ async function main(): Promise<void> {
     deploymentMode: deploymentMode ?? "unknown",
   });
 
-  const reporter = new PaperclipReporter(paperclipClient, 500, process.env.TARGET_PROJECT_ROOT);
+  // Resolve workspace CWD: Paperclip's workspace runtime (PAPERCLIP_WORKSPACE_CWD)
+  // takes precedence, then TARGET_PROJECT_ROOT from .env, then undefined.
+  const resolvedWorkspaceCwd = env.workspaceCwd || process.env.TARGET_PROJECT_ROOT || undefined;
+  if (env.workspaceCwd) {
+    log.info("Workspace context from Paperclip", {
+      cwd: env.workspaceCwd,
+      source: env.workspaceSource ?? "unknown",
+      strategy: env.workspaceStrategy ?? "unknown",
+      branch: env.workspaceBranch ?? "n/a",
+      repoUrl: env.workspaceRepoUrl ?? "n/a",
+    });
+  }
+
+  const reporter = new PaperclipReporter(paperclipClient, 500, resolvedWorkspaceCwd);
 
   // ── Step 3: Identify self ─────────────────────────────────────────
   // In board-access mode, use GET /api/agents/:id (no auth needed).
@@ -664,6 +714,53 @@ async function main(): Promise<void> {
       }
     }
 
+    // ── Prerequisite guard: skip issues whose dependencies aren't done ──
+    // The CEO creates sub-issues with metadata.dependsOn (array of task
+    // indices that must complete first). If any dependency is not done,
+    // skip this issue — the CEO's re-evaluation will promote it later.
+    const meta = issue.metadata as Record<string, unknown> | undefined;
+    const dependsOn = Array.isArray(meta?.dependsOn) ? (meta.dependsOn as number[]) : [];
+    const parentIssueId = meta?.parentIssueId as string | undefined;
+
+    if (dependsOn.length > 0 && parentIssueId) {
+      try {
+        const siblings = await paperclipClient.listIssues({ parentId: parentIssueId });
+        const siblingsByIndex = new Map<number, PaperclipIssue>();
+        for (const sib of siblings) {
+          const sibMeta = sib.metadata as Record<string, unknown> | undefined;
+          const sibIdx = sibMeta?.taskIndex;
+          if (typeof sibIdx === "number") {
+            siblingsByIndex.set(sibIdx, sib);
+          }
+        }
+
+        const unmetDeps = dependsOn.filter((depIdx) => {
+          const dep = siblingsByIndex.get(depIdx);
+          return !dep || dep.status !== "done";
+        });
+
+        if (unmetDeps.length > 0) {
+          const unmetLabels = unmetDeps.map((d) => {
+            const dep = siblingsByIndex.get(d);
+            return dep?.identifier ?? `task-${d}`;
+          });
+          log.info("Skipping issue — prerequisites not met", {
+            issueId: issue.id,
+            identifier: issue.identifier,
+            unmetDeps: unmetLabels,
+          });
+          continue;
+        }
+      } catch (depErr) {
+        // Non-fatal: if we can't check deps, proceed with processing
+        // (better to attempt than silently skip)
+        log.warn("Prerequisite check failed, proceeding", {
+          issueId: issue.id,
+          error: depErr instanceof Error ? depErr.message : String(depErr),
+        });
+      }
+    }
+
     // ── Phase A2: Checkout issue before processing ────────────────────
     // Prevents concurrent agents from processing the same issue.
     // expectedStatuses per Paperclip docs: checkout accepts issues in
@@ -790,7 +887,7 @@ async function main(): Promise<void> {
     try {
       await paperclipClient.reportCostEvent({
         agentId: env.agentId,
-        issueId: firstIssue?.id ?? null,
+        issueId: record.issueId ?? firstIssue?.id ?? null,
         projectId: firstIssue?.projectId ?? null,
         heartbeatRunId: env.heartbeatRunId ?? null,
         provider: inferProvider(record.model),

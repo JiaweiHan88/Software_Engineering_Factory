@@ -121,7 +121,7 @@ export class PaperclipLoop {
       timeoutMs: config.paperclip.timeoutMs,
     });
 
-    this.reporter = new PaperclipReporter(this.client);
+    this.reporter = new PaperclipReporter(this.client, 500, config.targetProjectRoot);
   }
 
   /**

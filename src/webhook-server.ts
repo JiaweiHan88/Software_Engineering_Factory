@@ -37,7 +37,7 @@ import { PaperclipReporter } from "./adapter/reporter.js";
 import { SessionManager } from "./adapter/session-manager.js";
 import { AgentDispatcher } from "./adapter/agent-dispatcher.js";
 import { handlePaperclipIssue } from "./adapter/heartbeat-handler.js";
-import { orchestrateCeoIssue } from "./adapter/ceo-orchestrator.js";
+import { orchestrateCeoIssue, reEvaluateDelegation } from "./adapter/ceo-orchestrator.js";
 import { withRetry, isPaperclipRetryable } from "./adapter/retry.js";
 import { resolveRoleMapping, PAPERCLIP_SKILLS } from "./config/role-mapping.js";
 import type { RoleMappingEntry } from "./config/role-mapping.js";
@@ -133,7 +133,7 @@ async function processHeartbeat(payload: HeartbeatPayload): Promise<{ success: b
       heartbeatRunId: runId,
     });
 
-    const reporter = new PaperclipReporter(paperclipClient);
+    const reporter = new PaperclipReporter(paperclipClient, 500, config.targetProjectRoot);
 
     // Identify agent
     const { value: agentSelf } = await withRetry(
@@ -201,12 +201,19 @@ async function processHeartbeat(payload: HeartbeatPayload): Promise<{ success: b
         if (mapping.isOrchestrator) {
           const existingChildren = await paperclipClient.listIssues({ parentId: issue.id });
           const activeChildren = existingChildren.filter((c: PaperclipIssue) => c.status !== "cancelled");
-          if (activeChildren.length > 0) continue;
 
-          await orchestrateCeoIssue(
-            issue, agentSelf, paperclipClient, reporter,
-            sessionManager, config, mapping,
-          );
+          if (activeChildren.length > 0) {
+            // Sub-issues exist → re-evaluate: promote backlog tasks whose deps are met
+            await reEvaluateDelegation(
+              issue, paperclipClient, sessionManager, config,
+            );
+          } else {
+            // No sub-issues yet → first-time delegation
+            await orchestrateCeoIssue(
+              issue, agentSelf, paperclipClient, reporter,
+              sessionManager, config, mapping,
+            );
+          }
         } else {
           await handlePaperclipIssue(issue, agentId, bmadRole, dispatcher, reporter);
         }

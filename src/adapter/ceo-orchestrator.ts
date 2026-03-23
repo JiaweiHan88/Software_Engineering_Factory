@@ -1,18 +1,26 @@
 /**
  * CEO Orchestrator — Strategic Issue Delegation via Copilot SDK
  *
- * Replaces the simple heuristic `inferTargetRole()` with a full Copilot SDK
- * session where the CEO agent (with its 4-file identity) reasons about:
- *   1. What BMAD pipeline phase the issue requires
- *   2. Which sub-tasks to create
- *   3. Which agents to assign each sub-task to
+ * The CEO is the intelligent orchestrator of the BMAD pipeline. It has two modes:
  *
- * The CEO does NOT do domain work itself — it decomposes and delegates.
+ * 1. **Initial Delegation** — Decomposes a new parent issue into sub-tasks with
+ *    dependency-aware scheduling. Tasks without prerequisites are created as `todo`
+ *    (triggering immediate agent wakeup). Tasks with prerequisites are created as
+ *    `backlog` (no wakeup). The CEO embeds prerequisite information in each task's
+ *    description and metadata so it can reason about readiness later.
+ *
+ * 2. **Re-evaluation** — When the CEO is re-woken (e.g., after a specialist completes
+ *    a sub-issue), it reviews all its sub-issues, checks which `backlog` tasks now
+ *    have their prerequisites met, and promotes them to `todo` (triggering wakeup).
+ *    It can also detect stalls, reassign, or escalate.
+ *
+ * The CEO decides the dependency graph — there is no hardcoded phase pipeline. The
+ * CEO might create all issues at once with dependencies, or create them incrementally
+ * across re-evaluation heartbeats. It is an AI decision, not a coded constraint.
  *
  * Flow:
- *   Issue → CEO session → structured delegation plan (JSON) →
- *   create sub-issues in Paperclip → assign to specialist agents →
- *   report back on parent issue
+ *   Initial:  Issue → CEO session → delegation plan (with deps) → create sub-issues → report
+ *   Re-eval:  CEO woken → check sub-issue statuses → promote ready backlog → report
  *
  * @module adapter/ceo-orchestrator
  */
@@ -48,6 +56,14 @@ export interface DelegationTask {
   priority: "critical" | "high" | "medium" | "low";
   /** BMAD pipeline phase for context */
   phase: "research" | "define" | "plan" | "execute" | "review";
+  /**
+   * Task IDs (by index in the tasks array, 0-based) that must complete
+   * before this task can start. Empty array means no prerequisites — the
+   * task is immediately actionable.
+   *
+   * Example: [0, 1] means tasks[0] and tasks[1] must be done first.
+   */
+  dependsOn: number[];
 }
 
 /**
@@ -58,12 +74,26 @@ export interface DelegationPlan {
   analysis: string;
   /** Which BMAD pipeline phase(s) this issue needs */
   phases: string[];
-  /** Ordered list of sub-tasks to create */
+  /** Ordered list of sub-tasks to create (index is the task ID for dependsOn) */
   tasks: DelegationTask[];
   /** Whether the CEO needs human approval before proceeding */
   requiresApproval: boolean;
   /** Reason for requiring approval (if applicable) */
   approvalReason?: string;
+}
+
+/**
+ * Result of the CEO re-evaluation of existing sub-issues.
+ */
+export interface ReEvaluationResult {
+  /** Whether the re-evaluation succeeded */
+  success: boolean;
+  /** Number of backlog issues promoted to todo */
+  promoted: number;
+  /** Whether all sub-issues are done (parent can close) */
+  allDone: boolean;
+  /** Error message if failed */
+  error?: string;
 }
 
 /**
@@ -188,17 +218,36 @@ ${rosterSummary}
 
 ## Your Task
 
-Analyze this issue and create a delegation plan. Follow the BMAD pipeline:
-1. **Research** — Analyst (bmad-analyst) and/or PM (bmad-pm) investigate feasibility
-2. **Define** — PM creates PRD (bmad-pm), Architect creates architecture (bmad-architect), UX creates design (bmad-ux-designer)
-3. **Plan** — Scrum Master creates sprint plan and stories (bmad-sm)
-4. **Execute** — Developer implements (bmad-dev), QA reviews (bmad-qa), Tech Writer documents (bmad-tech-writer)
+Analyze this issue and create a delegation plan with dependency-aware scheduling.
 
-Rules:
-- Do NOT skip phases. If the issue is vague, start with Research.
-- If the issue is already well-defined (clear requirements, clear architecture), you may skip to Plan or Execute.
-- For simple/quick tasks, consider assigning to Quick Flow (bmad-quick-flow) who handles spec+implement+review in one pass.
-- Each sub-task must be self-contained with enough context for the assigned agent.
+### Agent Capabilities
+- **Research** — Analyst (bmad-analyst) and/or PM (bmad-pm) investigate feasibility
+- **Define** — PM creates PRD (bmad-pm), Architect creates architecture (bmad-architect), UX creates design (bmad-ux-designer)
+- **Plan** — Scrum Master creates sprint plan and stories (bmad-sm)
+- **Execute** — Developer implements (bmad-dev), QA reviews (bmad-qa), Tech Writer documents (bmad-tech-writer)
+- **Quick** — Quick Flow (bmad-quick-flow) handles simple spec+implement+review in one pass
+
+### Dependency Rules
+- Use the \`dependsOn\` field to declare which tasks must complete before another can start.
+- \`dependsOn\` uses 0-based task indices from the \`tasks\` array.
+- Tasks with \`dependsOn: []\` (empty) are immediately actionable — they will start right away.
+- Tasks with dependencies will be held in backlog until their prerequisites are done.
+- YOU decide the dependency graph based on what makes sense for this issue. There is no fixed pipeline.
+- Multiple tasks can run in parallel if they don't depend on each other.
+
+### Examples of reasonable dependencies
+- PRD may depend on research findings (so the PM has data to reference)
+- Architecture may depend on PRD (so the architect knows the requirements)
+- Epic breakdown may depend on both PRD and architecture
+- Implementation depends on the plan
+- But research tasks can often run in parallel
+
+### Critical Rules
+- Each sub-task description MUST be self-contained with enough context for the agent.
+- In each task description, explicitly state what prerequisite outputs the agent should read from the workspace (if any).
+- Do NOT skip necessary phases. If the issue is vague, start with Research.
+- If the issue is already well-defined, you may skip straight to Plan or Execute.
+- For simple/quick tasks, use Quick Flow (bmad-quick-flow).
 - Set priority based on the parent issue priority and task criticality.
 
 ## Output Format
@@ -207,14 +256,31 @@ Respond with ONLY a JSON object (no markdown fences, no explanation outside the 
 
 {
   "analysis": "Brief analysis of what this issue requires",
-  "phases": ["research", "define"],
+  "phases": ["research", "define", "plan"],
   "tasks": [
     {
-      "title": "Research market requirements for X",
-      "description": "Investigate ...",
+      "title": "Research technical feasibility for X",
+      "description": "Investigate ... Save findings as research-findings.md",
       "assignTo": "bmad-analyst",
       "priority": "medium",
-      "phase": "research"
+      "phase": "research",
+      "dependsOn": []
+    },
+    {
+      "title": "Create PRD for X",
+      "description": "Based on the research findings (read research-findings.md from the workspace), create a comprehensive PRD ...",
+      "assignTo": "bmad-pm",
+      "priority": "medium",
+      "phase": "define",
+      "dependsOn": [0]
+    },
+    {
+      "title": "Design system architecture",
+      "description": "Read the PRD (prd.md) and research findings. Design the architecture ...",
+      "assignTo": "bmad-architect",
+      "priority": "medium",
+      "phase": "define",
+      "dependsOn": [0, 1]
     }
   ],
   "requiresApproval": false,
@@ -279,6 +345,9 @@ export function parseDelegationPlan(response: string): DelegationPlan | null {
         assignTo: String(task.assignTo),
         priority: validPriorities.has(String(task.priority)) ? String(task.priority) as DelegationTask["priority"] : "medium",
         phase: validPhases.has(String(task.phase)) ? String(task.phase) as DelegationTask["phase"] : "execute",
+        dependsOn: Array.isArray(task.dependsOn)
+          ? (task.dependsOn as unknown[]).filter((v): v is number => typeof v === "number")
+          : [],
       });
     }
 
@@ -454,11 +523,16 @@ export async function orchestrateCeoIssue(
     };
   }
 
-  // ── 6. Create sub-issues for each task in the plan ─────────────────
+  // ── 6. Create sub-issues with dependency-aware scheduling ───────────
+  // Tasks with dependsOn: [] get status "todo" → triggers immediate agent wakeup.
+  // Tasks with dependsOn: [n, ...] get status "backlog" → held until CEO promotes.
   let subtasksCreated = 0;
   const createdIssueIds: string[] = [];
 
-  for (const task of plan.tasks) {
+  for (let taskIdx = 0; taskIdx < plan.tasks.length; taskIdx++) {
+    const task = plan.tasks[taskIdx];
+    const isReady = task.dependsOn.length === 0;
+
     // Resolve the agent UUID for the assignee
     const assigneeId = await resolveAgentId(task.assignTo, client);
 
@@ -468,30 +542,44 @@ export async function orchestrateCeoIssue(
       });
     }
 
+    // Build prerequisite summary for the description
+    const prereqLines: string[] = [];
+    if (task.dependsOn.length > 0) {
+      prereqLines.push(``, `## Prerequisites`);
+      prereqLines.push(`This task is blocked until the following are completed:`);
+      for (const depIdx of task.dependsOn) {
+        const dep = plan.tasks[depIdx];
+        if (dep) {
+          prereqLines.push(`- **[${dep.phase}]** ${dep.title} (${dep.assignTo})`);
+        }
+      }
+      prereqLines.push(``, `*The CEO will move this task to "todo" once prerequisites are met.*`);
+    }
+
     try {
       const subIssue = await client.createIssue({
         title: task.title,
         description: [
           task.description,
+          ...prereqLines,
           ``,
           `---`,
           `*Parent issue: ${issue.title} (${issue.id})*`,
-          `*Phase: ${task.phase}*`,
+          `*Phase: ${task.phase} | Task index: ${taskIdx}*`,
           `*Delegated by CEO*`,
         ].join("\n"),
-        status: "todo",
+        // KEY: backlog does NOT trigger agent wakeup. todo DOES.
+        status: isReady ? "todo" : "backlog",
         priority: task.priority,
-        // NOTE: parentId is omitted during creation because the parent issue
-        // has an execution lock (CEO heartbeat is running). Setting parentId
-        // on a locked issue causes Paperclip to 500. We link via PATCH after.
         assigneeAgentId: assigneeId,
         goalId: issue.goalId,
-        // Propagate projectId so sub-issues live in the same project workspace
         projectId: issue.projectId,
         metadata: {
           bmadPhase: task.phase,
           parentIssueId: issue.id,
           delegatedBy: "ceo",
+          taskIndex: taskIdx,
+          dependsOn: task.dependsOn,
         },
       });
 
@@ -499,7 +587,6 @@ export async function orchestrateCeoIssue(
       try {
         await client.updateIssue(subIssue.id, { parentId: issue.id });
       } catch {
-        // Non-critical — the metadata already records the relationship
         log.warn("Could not link sub-issue to parent (non-critical)", {
           subIssueId: subIssue.id,
           parentId: issue.id,
@@ -514,19 +601,15 @@ export async function orchestrateCeoIssue(
         title: task.title,
         assignTo: task.assignTo,
         assigneeId: assigneeId ?? "unassigned",
+        status: isReady ? "todo" : "backlog",
+        dependsOn: task.dependsOn,
       });
     } catch (err: unknown) {
       // Paperclip may return 500 after the write succeeds (phantom 500).
-      // Check if the issue was actually created before treating as failure.
       const isPaperclip500 = err instanceof PaperclipApiError && err.statusCode === 500;
 
       if (isPaperclip500) {
         try {
-          // Sub-issues are intentionally created WITHOUT parentId (to avoid the
-          // Paperclip execution-lock 500). The parentId is linked via updateIssue
-          // after creation. If the phantom 500 fired during createIssue, the
-          // issue exists but has no parentId — querying by parentId won't find it.
-          // Instead, match on metadata.parentIssueId which IS set at creation time.
           const candidates = await client.listIssues(
             assigneeId ? { assigneeAgentId: assigneeId } : undefined,
           );
@@ -541,18 +624,17 @@ export async function orchestrateCeoIssue(
               subIssueId: phantom.id,
               title: task.title,
             });
-            // Link to parent now (deferred from the failed createIssue flow)
             try {
               await client.updateIssue(phantom.id, { parentId: issue.id });
             } catch {
-              // Non-critical — metadata already records the relationship
+              // Non-critical
             }
             createdIssueIds.push(phantom.id);
             subtasksCreated++;
-            continue; // Don't report as error
+            continue;
           }
         } catch {
-          // If we can't check, fall through to error reporting
+          // Fall through to error reporting
         }
       }
 
@@ -562,46 +644,55 @@ export async function orchestrateCeoIssue(
         error: String(err),
       });
 
-      // Report the failure but continue with remaining tasks
       try {
         await client.addIssueComment(
           issue.id,
           `⚠️ **CEO** — Failed to create sub-task "${task.title}": ${err instanceof Error ? err.message : String(err)}`,
         );
       } catch {
-        // Comment may also 500 — don't cascade errors
+        // Don't cascade errors
       }
+      // Push empty string so task indices stay aligned with createdIssueIds
+      createdIssueIds.push("");
     }
   }
 
   // ── 7. Report delegation summary on parent issue ──────────────────
+  const readyCount = plan.tasks.filter((t) => t.dependsOn.length === 0).length;
+  const blockedCount = plan.tasks.length - readyCount;
+
   const summaryLines = [
     `🎯 **CEO — Delegation Complete**`,
     ``,
     `**Analysis:** ${plan.analysis}`,
     `**Phases:** ${plan.phases.join(" → ")}`,
-    `**Sub-tasks created:** ${subtasksCreated}/${plan.tasks.length}`,
+    `**Sub-tasks created:** ${subtasksCreated}/${plan.tasks.length} (${readyCount} ready, ${blockedCount} waiting on prerequisites)`,
     ``,
   ];
 
   for (let i = 0; i < plan.tasks.length; i++) {
     const task = plan.tasks[i];
     const issueId = createdIssueIds[i];
-    const status = issueId ? `✅ created (${issueId})` : "❌ failed";
-    summaryLines.push(`${i + 1}. **[${task.phase}]** ${task.title} → ${task.assignTo} — ${status}`);
+    const depsInfo = task.dependsOn.length > 0
+      ? ` ⏳ depends on: ${task.dependsOn.map((d) => `#${d}`).join(", ")}`
+      : " ▶️ ready";
+    const status = issueId ? `✅ created` : "❌ failed";
+    summaryLines.push(`${i}. **[${task.phase}]** ${task.title} → ${task.assignTo} — ${status}${depsInfo}`);
   }
 
-  await client.addIssueComment(issue.id, summaryLines.join("\n"));
+  summaryLines.push(
+    ``,
+    `*I will re-evaluate when specialists complete their tasks and promote blocked issues as prerequisites are met.*`,
+  );
 
-  // The parent issue stays in_progress — it was set to in_progress at the
-  // start of orchestration. The CEO's inbox filter skips in_progress issues,
-  // so it won't re-process on the next heartbeat. The issue should only be
-  // marked done when all sub-tasks are complete (future: rollup logic).
+  await client.addIssueComment(issue.id, summaryLines.join("\n"));
 
   log.info("CEO orchestration complete", {
     issueId: issue.id,
     subtasksCreated,
     totalTasks: plan.tasks.length,
+    readyCount,
+    blockedCount,
   });
 
   return {
@@ -609,4 +700,337 @@ export async function orchestrateCeoIssue(
     subtasksCreated,
     plan,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CEO Re-evaluation — Promote Backlog Issues When Prerequisites Are Met
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Build a re-evaluation prompt for the CEO.
+ *
+ * Gives the CEO the full picture of all sub-issues and their statuses so it
+ * can decide which backlog tasks to promote, whether to reassign stuck tasks,
+ * or whether the parent issue can be closed.
+ */
+function buildReEvaluationPrompt(
+  parentIssue: PaperclipIssue,
+  children: PaperclipIssue[],
+): string {
+  const childSummary = children
+    .map((c) => {
+      const meta = c.metadata as Record<string, unknown> | undefined;
+      const taskIndex = meta?.taskIndex ?? "?";
+      const phase = meta?.bmadPhase ?? "?";
+      const deps = Array.isArray(meta?.dependsOn) ? (meta.dependsOn as number[]).join(", ") : "none";
+      return `  - [${taskIndex}] "${c.title}" — status: ${c.status}, phase: ${phase}, dependsOn: [${deps}], assignee: ${c.assigneeAgentId ?? "unassigned"}`;
+    })
+    .join("\n");
+
+  return `You are the CEO re-evaluating your delegation plan. A specialist has completed work and you need to check if any blocked tasks can now proceed.
+
+## Parent Issue
+- **Title**: ${parentIssue.title}
+- **ID**: ${parentIssue.id}
+
+## Current Sub-Issue Statuses
+${childSummary}
+
+## Your Task
+
+Review the sub-issues and decide what actions to take. For each decision, provide your reasoning.
+
+### Rules
+- A backlog task can be promoted to "todo" if ALL of its \`dependsOn\` tasks have status "done".
+- If all sub-issues are "done" or "cancelled", the parent issue should be marked "done".
+- If a task is stuck ("blocked" or stalled), you may reassign or add a comment to unblock.
+- If something unexpected happened, you may create additional sub-issues.
+- Do NOT promote a task if its prerequisites are not yet "done".
+
+## Output Format
+
+Respond with ONLY a JSON object:
+
+{
+  "actions": [
+    { "type": "promote", "issueId": "<id>", "reason": "All prerequisites done" },
+    { "type": "comment", "issueId": "<id>", "body": "Checking on progress..." },
+    { "type": "close_parent", "reason": "All sub-tasks are complete" }
+  ],
+  "summary": "Brief status update"
+}
+
+If no actions are needed, return \`{ "actions": [], "summary": "No changes needed" }\`.`;
+}
+
+/**
+ * Parse a re-evaluation action from the CEO's response.
+ */
+interface ReEvalAction {
+  type: "promote" | "comment" | "close_parent" | "reassign";
+  issueId?: string;
+  reason?: string;
+  body?: string;
+  newAssignee?: string;
+}
+
+/**
+ * Parse the CEO's re-evaluation response.
+ */
+function parseReEvaluationResponse(response: string): { actions: ReEvalAction[]; summary: string } | null {
+  let cleaned = response.trim();
+  const fenceMatch = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+  if (fenceMatch) {
+    cleaned = fenceMatch[1].trim();
+  }
+
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(cleaned.slice(firstBrace, lastBrace + 1)) as Record<string, unknown>;
+    const actions: ReEvalAction[] = [];
+
+    if (Array.isArray(parsed.actions)) {
+      for (const a of parsed.actions as Record<string, unknown>[]) {
+        const type = String(a.type ?? "");
+        if (["promote", "comment", "close_parent", "reassign"].includes(type)) {
+          actions.push({
+            type: type as ReEvalAction["type"],
+            issueId: a.issueId ? String(a.issueId) : undefined,
+            reason: a.reason ? String(a.reason) : undefined,
+            body: a.body ? String(a.body) : undefined,
+            newAssignee: a.newAssignee ? String(a.newAssignee) : undefined,
+          });
+        }
+      }
+    }
+
+    return {
+      actions,
+      summary: String(parsed.summary ?? "No summary"),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * CEO re-evaluation — check sub-issue statuses and promote ready tasks.
+ *
+ * Called when the CEO is re-woken after a specialist completes a sub-issue.
+ * The CEO reviews all children, determines which backlog tasks now have their
+ * prerequisites met, and promotes them to "todo" (which triggers agent wakeup).
+ *
+ * @param parentIssue - The parent issue the CEO is managing
+ * @param client - Paperclip API client
+ * @param sessionManager - For creating a CEO reasoning session
+ * @param config - Runtime config
+ * @param costTracker - Optional cost tracker
+ * @returns Re-evaluation result
+ */
+export async function reEvaluateDelegation(
+  parentIssue: PaperclipIssue,
+  client: PaperclipClient,
+  sessionManager: SessionManager,
+  config: BmadConfig,
+  costTracker?: CostTracker,
+): Promise<ReEvaluationResult> {
+  log.info("CEO re-evaluation starting", { issueId: parentIssue.id });
+
+  // ── 1. Fetch all children ─────────────────────────────────────────
+  const children = await client.listIssues({ parentId: parentIssue.id });
+  const activeChildren = children.filter((c) => c.status !== "cancelled");
+
+  if (activeChildren.length === 0) {
+    log.info("No active children — nothing to re-evaluate");
+    return { success: true, promoted: 0, allDone: true };
+  }
+
+  // ── 2. Quick check: are all children done? ────────────────────────
+  const allDone = activeChildren.every((c) => c.status === "done");
+  if (allDone) {
+    log.info("All children done — closing parent issue");
+    await client.updateIssue(parentIssue.id, { status: "done" });
+    await client.addIssueComment(
+      parentIssue.id,
+      `✅ **CEO — All sub-tasks complete.** Closing parent issue.`,
+    );
+    return { success: true, promoted: 0, allDone: true };
+  }
+
+  // ── 3. Quick path: check for promotable tasks without LLM ────────
+  // Build a taskIndex→status lookup from the children
+  const taskStatusByIndex = new Map<number, string>();
+  const backlogChildren: PaperclipIssue[] = [];
+
+  for (const child of activeChildren) {
+    const meta = child.metadata as Record<string, unknown> | undefined;
+    const taskIndex = meta?.taskIndex;
+    if (typeof taskIndex === "number") {
+      taskStatusByIndex.set(taskIndex, child.status);
+    }
+    if (child.status === "backlog") {
+      backlogChildren.push(child);
+    }
+  }
+
+  // Deterministic promotion: promote backlog tasks whose deps are all "done"
+  let promoted = 0;
+  for (const child of backlogChildren) {
+    const meta = child.metadata as Record<string, unknown> | undefined;
+    const dependsOn = Array.isArray(meta?.dependsOn) ? (meta.dependsOn as number[]) : [];
+
+    if (dependsOn.length === 0) {
+      // No deps but still in backlog — promote (shouldn't normally happen)
+      await client.updateIssue(child.id, { status: "todo" });
+      promoted++;
+      log.info("Promoted task (no deps)", { issueId: child.id, title: child.title });
+      continue;
+    }
+
+    const allDepsDone = dependsOn.every((depIdx) => {
+      const depStatus = taskStatusByIndex.get(depIdx);
+      return depStatus === "done";
+    });
+
+    if (allDepsDone) {
+      await client.updateIssue(child.id, { status: "todo" });
+      promoted++;
+      log.info("Promoted task (deps met)", {
+        issueId: child.id,
+        title: child.title,
+        dependsOn,
+      });
+    }
+  }
+
+  // ── 4. If promotions happened, report and exit (fast path) ────────
+  if (promoted > 0) {
+    const statusSummary = activeChildren.map((c) => {
+      const meta = c.metadata as Record<string, unknown> | undefined;
+      const idx = meta?.taskIndex ?? "?";
+      return `[${idx}] ${c.title}: ${c.status}`;
+    }).join("\n");
+
+    await client.addIssueComment(
+      parentIssue.id,
+      [
+        `🔄 **CEO — Re-evaluation Complete**`,
+        ``,
+        `Promoted **${promoted}** task(s) from backlog → todo.`,
+        ``,
+        `**Current status:**`,
+        statusSummary,
+      ].join("\n"),
+    );
+
+    return { success: true, promoted, allDone: false };
+  }
+
+  // ── 5. No deterministic promotions — use LLM for complex reasoning ─
+  // This handles edge cases: stuck tasks, reassignment, unexpected states
+  const hasStuckTasks = activeChildren.some(
+    (c) => c.status === "blocked" || c.status === "in_progress",
+  );
+
+  if (!hasStuckTasks) {
+    // Everything is either backlog (waiting) or in-progress — nothing to do
+    log.info("No promotions needed, no stuck tasks — CEO re-evaluation idle");
+    return { success: true, promoted: 0, allDone: false };
+  }
+
+  // Use LLM to reason about stuck/complex situations
+  const ceoAgentDef = getAgent("ceo") ?? getAgent("bmad-ceo") ?? {
+    name: "ceo",
+    displayName: "CEO - Chief Executive",
+    description: "Strategic orchestrator",
+    prompt: "You are the CEO. You orchestrate, not execute.",
+  };
+
+  let sessionId: string;
+  try {
+    sessionId = await sessionManager.createAgentSession({
+      agent: ceoAgentDef,
+      allAgents,
+      tools: allTools,
+      model: config.model,
+      systemMessage: config.agentSystemMessage,
+    });
+  } catch (err) {
+    log.error("Failed to create CEO re-eval session", {}, err instanceof Error ? err : undefined);
+    return { success: false, promoted: 0, allDone: false, error: String(err) };
+  }
+
+  const prompt = buildReEvaluationPrompt(parentIssue, activeChildren);
+  let response: string;
+  try {
+    response = await sessionManager.sendAndWait(sessionId, prompt, 120_000);
+  } catch (err) {
+    log.error("CEO re-eval session failed", {}, err instanceof Error ? err : undefined);
+    await sessionManager.closeSession(sessionId);
+    return { success: false, promoted: 0, allDone: false, error: String(err) };
+  }
+
+  await sessionManager.closeSession(sessionId);
+
+  if (costTracker) {
+    costTracker.recordUsage("ceo", config.model ?? "default", prompt, response, {
+      phase: "ceo-reeval",
+    });
+  }
+
+  const result = parseReEvaluationResponse(response);
+  if (!result || result.actions.length === 0) {
+    log.info("CEO re-eval: no actions from LLM");
+    return { success: true, promoted: 0, allDone: false };
+  }
+
+  // Execute LLM-decided actions
+  for (const action of result.actions) {
+    try {
+      switch (action.type) {
+        case "promote":
+          if (action.issueId) {
+            await client.updateIssue(action.issueId, { status: "todo" });
+            promoted++;
+            log.info("CEO promoted (LLM)", { issueId: action.issueId, reason: action.reason });
+          }
+          break;
+        case "comment":
+          if (action.issueId && action.body) {
+            await client.addIssueComment(action.issueId, `💬 **CEO**: ${action.body}`);
+          }
+          break;
+        case "close_parent":
+          await client.updateIssue(parentIssue.id, { status: "done" });
+          await client.addIssueComment(parentIssue.id, `✅ **CEO**: ${action.reason ?? "All work complete"}`);
+          return { success: true, promoted, allDone: true };
+        case "reassign":
+          if (action.issueId && action.newAssignee) {
+            const newId = await resolveAgentId(action.newAssignee, client);
+            if (newId) {
+              await client.updateIssue(action.issueId, { assigneeAgentId: newId });
+              log.info("CEO reassigned", { issueId: action.issueId, to: action.newAssignee });
+            }
+          }
+          break;
+      }
+    } catch (err) {
+      log.warn("CEO re-eval action failed", {
+        action: action.type,
+        issueId: action.issueId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (result.summary) {
+    await client.addIssueComment(parentIssue.id, `🔄 **CEO — Re-evaluation:** ${result.summary}`);
+  }
+
+  return { success: true, promoted, allDone: false };
 }

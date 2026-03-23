@@ -19,6 +19,8 @@ import type { PaperclipClient } from "./paperclip-client.js";
 import type { DispatchResult } from "./agent-dispatcher.js";
 import type { HeartbeatResult } from "./heartbeat-handler.js";
 import type { SprintEvent } from "./sprint-runner.js";
+import { readdirSync, statSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Logger } from "../observability/logger.js";
 
 const log = Logger.child("reporter");
@@ -56,10 +58,12 @@ export class PaperclipReporter {
   private client: PaperclipClient;
   private history: ReportLogEntry[] = [];
   private maxHistorySize: number;
+  private workspaceDir: string | undefined;
 
-  constructor(client: PaperclipClient, maxHistorySize = 500) {
+  constructor(client: PaperclipClient, maxHistorySize = 500, workspaceDir?: string) {
     this.client = client;
     this.maxHistorySize = maxHistorySize;
+    this.workspaceDir = workspaceDir;
   }
 
   // ── High-Level Reporting Methods ──────────────────────────────────────
@@ -92,7 +96,18 @@ export class PaperclipReporter {
 
     // Also update the issue status in Paperclip if completed or blocked
     if (result.status === "completed") {
+      // On completion, scan workspace for artifacts and append to comment
+      if (this.workspaceDir) {
+        const artifactInfo = this.scanWorkspaceArtifacts();
+        if (artifactInfo) {
+          await this.postIssueComment(agentId, issueId, "artifacts", artifactInfo);
+        }
+      }
       await this.updateIssueStatus(issueId, "done");
+
+      // Wake the CEO (parent assignee) so it can re-evaluate dependencies
+      // and promote the next wave of backlog tasks to "todo".
+      await this.wakeParentAssignee(issueId);
     } else if (result.status === "needs-human") {
       await this.updateIssueStatus(issueId, "blocked");
     }
@@ -183,6 +198,41 @@ export class PaperclipReporter {
   // ── Low-Level Reporting ───────────────────────────────────────────────
 
   /**
+   * Scan the workspace directory for artifact files produced by agents.
+   * Returns a formatted markdown summary of found files, or undefined if none.
+   */
+  private scanWorkspaceArtifacts(): string | undefined {
+    if (!this.workspaceDir) return undefined;
+    try {
+      const entries = readdirSync(this.workspaceDir, { withFileTypes: true });
+      const files = entries
+        .filter((e) => e.isFile())
+        .map((e) => {
+          const fullPath = join(this.workspaceDir!, e.name);
+          const stats = statSync(fullPath);
+          const sizeKb = (stats.size / 1024).toFixed(1);
+          let preview = "";
+          try {
+            const content = readFileSync(fullPath, "utf-8");
+            const lines = content.split("\n").filter((l) => l.trim());
+            preview = lines[0]?.slice(0, 100) ?? "";
+          } catch {
+            preview = "(binary or unreadable)";
+          }
+          return { name: e.name, sizeKb, preview };
+        });
+      if (files.length === 0) return undefined;
+      return [
+        `📁 **Workspace Artifacts** (\`${this.workspaceDir}\`):`,
+        "",
+        ...files.map((f) => `- \`${f.name}\` (${f.sizeKb} KB) — ${f.preview}`),
+      ].join("\n");
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Post a comment to a Paperclip issue and record it in the history log.
    *
    * This is the primary reporting mechanism — replaces the old
@@ -238,6 +288,45 @@ export class PaperclipReporter {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       log.error("Failed to update issue", { issueId, status, error: errorMsg });
+    }
+  }
+
+  /**
+   * If the completed issue is a sub-issue (has a parentId), wake the parent
+   * issue's assignee so it can re-evaluate dependencies and promote the next
+   * wave of tasks. This is the mechanism that keeps the CEO in the loop after
+   * each specialist finishes.
+   *
+   * Silently logs and returns on any failure — wakeup is best-effort.
+   */
+  private async wakeParentAssignee(issueId: string): Promise<void> {
+    try {
+      const issue = await this.client.getIssue(issueId);
+      if (!issue.parentId) {
+        return; // Not a sub-issue — nothing to wake
+      }
+
+      const parent = await this.client.getIssue(issue.parentId);
+      if (!parent.assigneeAgentId) {
+        log.warn("Parent issue has no assignee, cannot wake", {
+          issueId,
+          parentId: issue.parentId,
+        });
+        return;
+      }
+
+      await this.client.wakeAgent(parent.assigneeAgentId);
+      log.info("Woke parent assignee for re-evaluation", {
+        issueId,
+        parentId: issue.parentId,
+        parentAssigneeId: parent.assigneeAgentId,
+      });
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      log.warn("Failed to wake parent assignee (non-fatal)", {
+        issueId,
+        error: errorMsg,
+      });
     }
   }
 

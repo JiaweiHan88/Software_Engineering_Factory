@@ -2,11 +2,12 @@
 /**
  * E2E Test — Unified BMAD Copilot Factory Pipeline Validation
  *
- * Two modes:
- *   --smoke   Quick validation: CEO heartbeat → 1 specialist → protocol checks → costs
- *   --full    Full spec pipeline: CEO delegation → multi-phase (research→define→plan) with invariants
+ * Three modes:
+ *   --smoke       Quick validation: CEO heartbeat → 1 specialist → protocol checks → costs
+ *   --full        Full spec pipeline: CEO delegation → multi-phase (research→define→plan) with invariants
+ *   --autonomous  Self-driving pipeline: resume all agents, create seed issue, let wakeOnDemand drive
  *
- * Both modes use Paperclip's native `/heartbeat/invoke` endpoint.
+ * All modes use Paperclip's native `/heartbeat/invoke` endpoint.
  *
  * Prerequisites:
  * - Paperclip running at localhost:3100 (local_trusted mode)
@@ -18,6 +19,7 @@
  *   npx tsx scripts/e2e-test.ts --smoke --ceo-only               # CEO only (no specialist)
  *   npx tsx scripts/e2e-test.ts --full                            # Full spec pipeline (default)
  *   npx tsx scripts/e2e-test.ts --full --stop-after=research      # Stop after research phase
+ *   npx tsx scripts/e2e-test.ts --autonomous --timeout=30         # Autonomous self-driving pipeline
  *   npx tsx scripts/e2e-test.ts --skip-cleanup --verbose          # Keep test data, verbose output
  *
  * @module scripts/e2e-test
@@ -41,6 +43,7 @@ import {
 const FLAGS = {
   smoke: process.argv.includes("--smoke"),
   full: process.argv.includes("--full"),
+  autonomous: process.argv.includes("--autonomous"),
   ceoOnly: process.argv.includes("--ceo-only"),
   skipCleanup: process.argv.includes("--skip-cleanup"),
   verbose: process.argv.includes("--verbose"),
@@ -48,10 +51,14 @@ const FLAGS = {
     const arg = process.argv.find((a) => a.startsWith("--stop-after="));
     return arg ? arg.split("=")[1] as BmadPhase : null;
   })(),
+  timeout: (() => {
+    const arg = process.argv.find((a) => a.startsWith("--timeout="));
+    return arg ? parseInt(arg.split("=")[1], 10) * 60_000 : 30 * 60_000;
+  })(),
 };
 
-// Default to --full if neither flag given
-if (!FLAGS.smoke && !FLAGS.full) {
+// Default to --full if no mode flag given
+if (!FLAGS.smoke && !FLAGS.full && !FLAGS.autonomous) {
   FLAGS.full = true;
 }
 
@@ -961,24 +968,199 @@ async function runFull(): Promise<boolean> {
   return printTestReport(traces, allInvariants, totalTimeSec, subIssues.length, phaseGroups);
 }
 
+// ── Autonomous Pipeline ──────────────────────────────────────────────────────
+
+/**
+ * Autonomous mode: resume all agents, create a seed issue, and let Paperclip's
+ * wakeOnDemand pipeline self-drive. Poll for completion instead of invoking
+ * heartbeats explicitly.
+ */
+async function runAutonomous(): Promise<boolean> {
+  const startTime = Date.now();
+  await setup("bmad-e2e-autonomous");
+
+  // 1. Resume ALL agents (critical — wakeOnDemand needs active agents)
+  await resumeAllAgents();
+  log("▶️", "All agents resumed — wakeOnDemand will drive the pipeline");
+
+  // 2. Create seed issue assigned to CEO, status=todo
+  //    This triggers Paperclip's issue.create wakeup on CEO
+  const seedIssue = await createIssue(SPEC_ISSUE, "autonomous");
+  await paperclip("PATCH", `/api/issues/${seedIssue.id}`, { status: "todo" });
+  log("🚀", "Seed issue created and assigned to CEO — pipeline is self-driving now");
+
+  // 3. Poll: wait for CEO to create sub-issues (timeout: 5 min)
+  let subIssues: PaperclipIssue[] = [];
+  const ceoPollDeadline = Date.now() + 5 * 60_000;
+  while (Date.now() < ceoPollDeadline) {
+    subIssues = await findSubIssues(seedIssue.id);
+    if (subIssues.length > 0) break;
+    log("⏳", "Waiting for CEO to create sub-issues...");
+    await new Promise((r) => setTimeout(r, 10_000));
+  }
+  if (subIssues.length === 0) {
+    log("💥", "CEO did not create sub-issues within 5 minutes");
+    await cleanup(seedIssue.id, []);
+    return false;
+  }
+
+  // Log delegation plan
+  const phaseGroups = groupByPhase(subIssues);
+  log("📊", `CEO created ${subIssues.length} sub-issues: ${[...phaseGroups.keys()].join(" → ")}`);
+  for (const issue of subIssues) {
+    const agentKey = issue.assigneeAgentId ? resolveAgentKey(issue.assigneeAgentId) : "?";
+    const phase = (issue.metadata as Record<string, string>)?.bmadPhase ?? "?";
+    log("  📌", `[${phase}] ${issue.title} → ${agentKey}`);
+  }
+
+  // 4. Poll: wait for all spec-phase sub-issues to reach "done" (or timeout)
+  const specIssueIds = new Set(
+    subIssues
+      .filter((i) => {
+        const phase = (i.metadata as Record<string, string>)?.bmadPhase;
+        return phase && ["research", "define", "plan"].includes(phase);
+      })
+      .map((i) => i.id),
+  );
+
+  const pipelineDeadline = Date.now() + FLAGS.timeout;
+  let lastStatusLog = "";
+  while (Date.now() < pipelineDeadline) {
+    // Re-fetch all sub-issues
+    const current = await findSubIssues(seedIssue.id);
+    const specCurrent = current.filter((i) => specIssueIds.has(i.id));
+
+    const statusMap = specCurrent
+      .map((i) => {
+        const phase = (i.metadata as Record<string, string>)?.bmadPhase ?? "?";
+        return `${phase}:${i.status}`;
+      })
+      .join(" | ");
+
+    if (statusMap !== lastStatusLog) {
+      log("📊", `Pipeline status: ${statusMap}`);
+      lastStatusLog = statusMap;
+    }
+
+    const allDone = specCurrent.every(
+      (i) => i.status === "done" || i.status === "cancelled",
+    );
+    if (allDone) {
+      log("✅", "All spec-phase sub-issues completed!");
+      break;
+    }
+
+    await new Promise((r) => setTimeout(r, 15_000));
+  }
+
+  // 5. Collect traces from completed sub-issues (comments, status)
+  const traces: PhaseTrace[] = [];
+  for (const issue of subIssues) {
+    const phase =
+      ((issue.metadata as Record<string, string>)?.bmadPhase as BmadPhase) ?? "execute";
+    const agentKey = issue.assigneeAgentId
+      ? resolveAgentKey(issue.assigneeAgentId)
+      : "unknown";
+    const agentName = issue.assigneeAgentId
+      ? resolveAgentName(issue.assigneeAgentId)
+      : "unknown";
+    const updated = await paperclip<PaperclipIssue>(
+      "GET",
+      `/api/issues/${issue.id}`,
+    );
+    const comments = await paperclip<PaperclipComment[]>(
+      "GET",
+      `/api/issues/${issue.id}/comments`,
+    );
+    traces.push({
+      issueId: issue.id,
+      title: issue.title,
+      phase,
+      agentKey,
+      agentName,
+      heartbeatStatus: updated.status === "done" ? "succeeded" : updated.status,
+      issueStatus: updated.status,
+      durationSec: 0, // Can't measure per-agent in autonomous mode
+      commentCount: comments.length,
+      totalCommentChars: comments.reduce((sum, c) => sum + c.body.length, 0),
+      commentPreviews: comments.map((c) => c.body.split("\n")[0]),
+    });
+  }
+
+  // 6. Run invariants
+  const parentIssue = await paperclip<PaperclipIssue>(
+    "GET",
+    `/api/issues/${seedIssue.id}`,
+  );
+  const parentComments = await paperclip<PaperclipComment[]>(
+    "GET",
+    `/api/issues/${seedIssue.id}/comments`,
+  );
+  const delegationInvariants = validateDelegationInvariants(
+    subIssues,
+    parentIssue.status,
+    parentComments,
+    phaseGroups,
+  );
+  const phaseInvariants = traces.flatMap((t) => validatePhaseInvariants(t));
+  const crossPhaseInvariants = validateCrossPhaseInvariants(traces, subIssues);
+  let costInvariant: InvariantResult;
+  try {
+    costInvariant = await verifyCosts();
+  } catch {
+    costInvariant = {
+      id: "C2",
+      label: "Cost data",
+      passed: false,
+      detail: "Check failed",
+    };
+  }
+  const crossWithRealCost = crossPhaseInvariants.map((inv) =>
+    inv.id === "C2" ? costInvariant : inv,
+  );
+  const totalTimeSec = Math.round((Date.now() - startTime) / 1000);
+  const softAssertions = runSoftAssertions(traces, subIssues, totalTimeSec);
+  const allInvariants = [
+    ...delegationInvariants,
+    ...phaseInvariants,
+    ...crossWithRealCost,
+    ...softAssertions,
+  ];
+
+  // 7. Cleanup + report
+  await cleanup(seedIssue.id, subIssues);
+  return printTestReport(
+    traces,
+    allInvariants,
+    totalTimeSec,
+    subIssues.length,
+    phaseGroups,
+  );
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Main
 // ═════════════════════════════════════════════════════════════════════════════
 
 async function main(): Promise<void> {
-  const mode = FLAGS.smoke ? "smoke" : "full";
+  const mode = FLAGS.smoke ? "smoke" : FLAGS.autonomous ? "autonomous" : "full";
 
   console.log("\n🧪 BMAD Copilot Factory — E2E Test");
   console.log(`   Paperclip: ${PAPERCLIP_URL}`);
   console.log(`   Company:   ${COMPANY_ID}`);
   console.log(`   Mode:      ${mode}${FLAGS.stopAfter ? ` (stop-after=${FLAGS.stopAfter})` : ""}`);
+  console.log(`   Timeout:   ${FLAGS.timeout / 60_000} min`);
   console.log(`   Flags:     ${FLAGS.ceoOnly ? "--ceo-only " : ""}${FLAGS.skipCleanup ? "--skip-cleanup " : ""}${FLAGS.verbose ? "--verbose" : ""}`);
   console.log();
 
   setVerbose(FLAGS.verbose);
   await resolveAgentIds();
 
-  const passed = FLAGS.smoke ? await runSmoke() : await runFull();
+  const passed = FLAGS.smoke
+    ? await runSmoke()
+    : FLAGS.autonomous
+      ? await runAutonomous()
+      : await runFull();
   process.exit(passed ? 0 : 1);
 }
 

@@ -40,7 +40,7 @@ import { PaperclipReporter } from "./adapter/reporter.js";
 import { SessionManager } from "./adapter/session-manager.js";
 import { AgentDispatcher } from "./adapter/agent-dispatcher.js";
 import { handlePaperclipIssue } from "./adapter/heartbeat-handler.js";
-import { orchestrateCeoIssue } from "./adapter/ceo-orchestrator.js";
+import { orchestrateCeoIssue, reEvaluateDelegation } from "./adapter/ceo-orchestrator.js";
 import { withRetry, isPaperclipRetryable } from "./adapter/retry.js";
 import { resolveRoleMapping, PAPERCLIP_SKILLS } from "./config/role-mapping.js";
 import type { RoleMappingEntry } from "./config/role-mapping.js";
@@ -445,7 +445,7 @@ async function main(): Promise<void> {
     deploymentMode: deploymentMode ?? "unknown",
   });
 
-  const reporter = new PaperclipReporter(paperclipClient);
+  const reporter = new PaperclipReporter(paperclipClient, 500, process.env.TARGET_PROJECT_ROOT);
 
   // ── Step 3: Identify self ─────────────────────────────────────────
   // In board-access mode, use GET /api/agents/:id (no auth needed).
@@ -694,38 +694,51 @@ async function main(): Promise<void> {
 
     try {
       if (mapping.isOrchestrator) {
-        // ── Guard: skip if CEO already delegated this issue ────────────
-        // Defense-in-depth: if sub-issues exist, another heartbeat already
-        // ran delegation. Skip to avoid duplicates.
+        // ── CEO routing: initial delegation vs re-evaluation ──────────
+        // If sub-issues already exist → re-evaluate (promote backlog tasks
+        // whose prerequisites are now met).
+        // If no sub-issues → fresh delegation (decompose and create plan).
         const existingChildren = await paperclipClient.listIssues({ parentId: lockedIssue.id });
         const activeChildren = existingChildren.filter(
           (c) => c.status !== "cancelled",
         );
+
         if (activeChildren.length > 0) {
-          log.info("Skipping already-delegated issue (has active sub-issues)", {
+          // Re-evaluation mode: check deps, promote ready backlog tasks
+          log.info("CEO re-evaluation mode (existing sub-issues)", {
             issueId: lockedIssue.id,
             childCount: activeChildren.length,
           });
-          continue;
+          const reEvalResult = await reEvaluateDelegation(
+            lockedIssue,
+            paperclipClient,
+            sessionManager,
+            config,
+            costTracker,
+          );
+          log.info("CEO re-evaluation result", {
+            issueId: lockedIssue.id,
+            promoted: reEvalResult.promoted,
+            allDone: reEvalResult.allDone,
+          });
+        } else {
+          // Initial delegation mode: decompose issue into sub-tasks
+          const result = await orchestrateCeoIssue(
+            lockedIssue,
+            agentSelf,
+            paperclipClient,
+            reporter,
+            sessionManager,
+            config,
+            mapping,
+            costTracker,
+          );
+          log.info("CEO orchestration result", {
+            issueId: lockedIssue.id,
+            success: result.success,
+            subtasksCreated: result.subtasksCreated,
+          });
         }
-
-        // CEO orchestrator: use Copilot SDK session to analyze issue,
-        // produce a structured delegation plan, and create sub-issues
-        const result = await orchestrateCeoIssue(
-          lockedIssue,
-          agentSelf,
-          paperclipClient,
-          reporter,
-          sessionManager,
-          config,
-          mapping,
-          costTracker,
-        );
-        log.info("CEO orchestration result", {
-          issueId: lockedIssue.id,
-          success: result.success,
-          subtasksCreated: result.subtasksCreated,
-        });
       } else {
         // Domain agent: process the issue directly
         await handlePaperclipIssue(lockedIssue, env.agentId, bmadRole, dispatcher, reporter);

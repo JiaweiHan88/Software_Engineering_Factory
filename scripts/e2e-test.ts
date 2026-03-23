@@ -6,6 +6,8 @@
  *   --smoke       Quick validation: CEO heartbeat → 1 specialist → protocol checks → costs
  *   --full        Full spec pipeline: CEO delegation → multi-phase (research→define→plan) with invariants
  *   --autonomous  Self-driving pipeline: resume all agents, create seed issue, let wakeOnDemand drive
+ *                 Default: full pipeline (research→define→plan→execute→review)
+ *                 With --spec-only: stop after plan phase (no implementation/review)
  *
  * All modes use Paperclip's native `/heartbeat/invoke` endpoint.
  *
@@ -19,13 +21,17 @@
  *   npx tsx scripts/e2e-test.ts --smoke --ceo-only               # CEO only (no specialist)
  *   npx tsx scripts/e2e-test.ts --full                            # Full spec pipeline (default)
  *   npx tsx scripts/e2e-test.ts --full --stop-after=research      # Stop after research phase
- *   npx tsx scripts/e2e-test.ts --autonomous --timeout=30         # Autonomous self-driving pipeline
+ *   npx tsx scripts/e2e-test.ts --autonomous                      # Full pipeline: spec + implement + review
+ *   npx tsx scripts/e2e-test.ts --autonomous --spec-only          # Spec-only: stop after plan phase
+ *   npx tsx scripts/e2e-test.ts --autonomous --timeout=45         # Custom timeout in minutes
  *   npx tsx scripts/e2e-test.ts --skip-cleanup --verbose          # Keep test data, verbose output
  *
  * @module scripts/e2e-test
  */
 
-import { mkdirSync } from "node:fs";
+import { mkdirSync, existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { execSync } from "node:child_process";
 import {
   PAPERCLIP_URL, COMPANY_ID, AGENTS,
   paperclip, invokeHeartbeat, waitForHeartbeatRun,
@@ -47,13 +53,15 @@ const FLAGS = {
   ceoOnly: process.argv.includes("--ceo-only"),
   skipCleanup: process.argv.includes("--skip-cleanup"),
   verbose: process.argv.includes("--verbose"),
+  /** Run only spec phases (research→define→plan), skip execute+review */
+  specOnly: process.argv.includes("--spec-only"),
   stopAfter: (() => {
     const arg = process.argv.find((a) => a.startsWith("--stop-after="));
     return arg ? arg.split("=")[1] as BmadPhase : null;
   })(),
   timeout: (() => {
     const arg = process.argv.find((a) => a.startsWith("--timeout="));
-    return arg ? parseInt(arg.split("=")[1], 10) * 60_000 : 30 * 60_000;
+    return arg ? parseInt(arg.split("=")[1], 10) * 60_000 : 45 * 60_000; // 45 min default for full pipeline
   })(),
 };
 
@@ -74,6 +82,12 @@ const PHASE_ORDER: BmadPhase[] = ["research", "define", "plan", "execute", "revi
 
 /** Phases we expect the spec pipeline to cover (stop before execute). */
 const SPEC_PHASES: BmadPhase[] = ["research", "define", "plan"];
+
+/** Phases for the full pipeline (includes implementation and review). */
+const ALL_PHASES: BmadPhase[] = ["research", "define", "plan", "execute", "review"];
+
+/** Active phases based on --spec-only flag. */
+const activePipelinePhases = (): BmadPhase[] => FLAGS.specOnly ? SPEC_PHASES : ALL_PHASES;
 
 /** Structured trace of a single specialist invocation. */
 interface PhaseTrace {
@@ -158,6 +172,64 @@ const SPEC_ISSUE = {
     "",
     "Keep each deliverable concise — this is a small utility, not an enterprise platform.",
     "Do NOT create implementation tasks, write code, or assign development work.",
+  ].join("\n"),
+  priority: "medium" as const,
+};
+
+/**
+ * Full-pipeline task: specification → implementation → tests → code review.
+ *
+ * This seed issue instructs the CEO to cover ALL phases of the BMAD pipeline,
+ * including execute (dev agent writes code + tests) and review (QA agent
+ * performs adversarial code review). The scope is kept intentionally small
+ * so the entire pipeline completes within a reasonable time.
+ *
+ * Key differences from SPEC_ISSUE:
+ * - Explicitly requests implementation, tests, AND code review
+ * - Small scope (single module with ~3 functions) to bound execution time
+ * - Specifies Node.js + vitest (available on macOS dev machines)
+ * - Requests working test suite that the E2E test can verify
+ */
+const FULL_PIPELINE_ISSUE = {
+  title: "Build a CSV-to-JSON converter module with tests",
+  description: [
+    "## Context",
+    "We need a small Node.js module that converts CSV strings/files to JSON.",
+    "This is a well-defined, self-contained task — no external APIs, no databases.",
+    "",
+    "## Requirements",
+    "- Export a `parseCsv(input: string, options?: CsvOptions): Record<string, string>[]` function",
+    "- Support custom delimiters (comma, semicolon, tab) via options",
+    "- Handle quoted fields and escaped characters (RFC 4180 compliant)",
+    "- Use the first row as object keys by default (configurable via options)",
+    "- Export a `convertFile(inputPath: string, outputPath?: string, options?: CsvOptions): Promise<void>` function",
+    "- Exit with meaningful error messages (file not found, parse error, empty input)",
+    "",
+    "## Technical Constraints",
+    "- **Language**: TypeScript (Node.js — already available in workspace)",
+    "- **Package manager**: npm (already available)",
+    "- **Test framework**: vitest (install via `npm install -D vitest`)",
+    "- **No external CSV parsing libraries** — implement the parser from scratch",
+    "- Keep it simple: ~3 exported functions, ~1 source file, ~1 test file",
+    "- Must include `package.json` with `scripts.test` configured",
+    "",
+    "## Scope — FULL PIPELINE",
+    "This issue covers the COMPLETE development lifecycle:",
+    "",
+    "1. **Research** — Brief survey of CSV parsing edge cases (RFC 4180, quoting rules)",
+    "2. **Define** — Concise PRD with the API surface and error handling strategy",
+    "3. **Plan** — Simple story breakdown (1-2 stories: core parser + file I/O)",
+    "4. **Execute** — Implement the module in TypeScript:",
+    "   - `src/csv-parser.ts` — Core parser logic",
+    "   - `src/csv-parser.test.ts` — Test suite with ≥5 test cases",
+    "   - `package.json` — With `scripts.test: \"vitest run\"`",
+    "   - `tsconfig.json` — TypeScript config",
+    "5. **Review** — Code review with quality checks, findings must be addressed",
+    "",
+    "After implementation, **run the tests** (`npm test`) and ensure they pass.",
+    "After code review, fix any HIGH/CRITICAL findings and re-run tests.",
+    "",
+    "Keep everything minimal — this is an E2E test for the pipeline, not a production tool.",
   ].join("\n"),
   priority: "medium" as const,
 };
@@ -596,9 +668,15 @@ function validateDelegationInvariants(
   // D6: At least one define phase task
   results.push({ id: "D6", label: "Define phase present", passed: (phaseGroups.get("define")?.length ?? 0) > 0, detail: `${phaseGroups.get("define")?.length ?? 0} task(s)` });
 
-  // D7: No execute phase tasks (spec-only)
+  // D7: Execute phase tasks — depends on mode
   const execCount = phaseGroups.get("execute")?.length ?? 0;
-  results.push({ id: "D7", label: "No execute phase tasks", passed: execCount === 0, detail: execCount === 0 ? "OK" : `${execCount} execute task(s)` });
+  if (FLAGS.specOnly) {
+    // Spec-only: no execute phase tasks expected
+    results.push({ id: "D7", label: "No execute phase tasks (spec-only)", passed: execCount === 0, detail: execCount === 0 ? "OK" : `${execCount} execute task(s)` });
+  } else {
+    // Full pipeline: execute phase tasks expected
+    results.push({ id: "D7", label: "Execute phase tasks present", passed: execCount > 0, detail: `${execCount} execute task(s)` });
+  }
 
   // D8: Parent issue progressed
   results.push({ id: "D8", label: "Parent issue in_progress", passed: parentStatus === "in_progress" || parentStatus === "done", detail: `status: ${parentStatus}` });
@@ -610,6 +688,15 @@ function validateDelegationInvariants(
   // D10: All assignees are valid agents
   const allValid = subIssues.every((i) => !i.assigneeAgentId || resolveAgentKey(i.assigneeAgentId) !== "unknown");
   results.push({ id: "D10", label: "All assignees are valid agents", passed: allValid, detail: allValid ? "OK" : "Some assignees not in AGENTS map" });
+
+  // D11: Plan phase present
+  results.push({ id: "D11", label: "Plan phase present", passed: (phaseGroups.get("plan")?.length ?? 0) > 0, detail: `${phaseGroups.get("plan")?.length ?? 0} task(s)` });
+
+  // D12: Review phase present (full pipeline only)
+  if (!FLAGS.specOnly) {
+    const reviewCount = phaseGroups.get("review")?.length ?? 0;
+    results.push({ id: "D12", label: "Review phase present", passed: reviewCount > 0, detail: `${reviewCount} task(s)` });
+  }
 
   return results;
 }
@@ -648,17 +735,235 @@ function validateCrossPhaseInvariants(
   // C2: Cost data — placeholder, replaced by real check
   results.push({ id: "C2", label: "Cost data for all agents", passed: true, detail: "Checked separately" });
 
-  // C3: No orphan sub-issues in spec phases
+  // C3: No orphan sub-issues in tracked phases
   const processedIds = new Set(traces.map((t) => t.issueId));
-  const specPhaseSet = new Set(SPEC_PHASES as string[]);
+  const activePhaseSet = new Set(activePipelinePhases() as string[]);
   const trueOrphans = subIssues.filter((i) => {
     if (processedIds.has(i.id)) return false;
     const phase = (i.metadata as Record<string, string>)?.bmadPhase;
-    return phase && specPhaseSet.has(phase);
+    return phase && activePhaseSet.has(phase);
   });
-  results.push({ id: "C3", label: "No orphan sub-issues in spec phases", passed: trueOrphans.length === 0, detail: trueOrphans.length === 0 ? "OK" : `${trueOrphans.length} unprocessed` });
+  results.push({ id: "C3", label: "No orphan sub-issues in tracked phases", passed: trueOrphans.length === 0, detail: trueOrphans.length === 0 ? "OK" : `${trueOrphans.length} unprocessed` });
 
   return results;
+}
+
+// ── Execute & Review Phase Invariants (Full Pipeline) ────────────────────────
+
+/**
+ * Validate execute-phase invariants: dev agent produced code artifacts.
+ *
+ * Checks issue comments for implementation signals and verifies the workspace
+ * contains expected files (source code, tests, package.json).
+ */
+function validateExecutePhaseInvariants(
+  traces: PhaseTrace[],
+  workspaceDir: string | undefined,
+): InvariantResult[] {
+  const results: InvariantResult[] = [];
+  const execTraces = traces.filter((t) => t.phase === "execute");
+
+  if (execTraces.length === 0) {
+    results.push({ id: "E1", label: "Execute phase ran", passed: false, detail: "No execute-phase traces" });
+    return results;
+  }
+
+  // E1: Execute phase heartbeat(s) succeeded
+  const allSucceeded = execTraces.every((t) => t.heartbeatStatus === "succeeded");
+  results.push({
+    id: "E1",
+    label: "Execute phase heartbeat(s) succeeded",
+    passed: allSucceeded,
+    detail: execTraces.map((t) => `${t.agentKey}:${t.heartbeatStatus}`).join(", "),
+  });
+
+  // E2: Dev agent posted substantive comments (implementation summary)
+  const totalChars = execTraces.reduce((sum, t) => sum + t.totalCommentChars, 0);
+  results.push({
+    id: "E2",
+    label: "Dev agent posted implementation comments",
+    passed: totalChars > 200,
+    detail: `${totalChars} chars across ${execTraces.reduce((s, t) => s + t.commentCount, 0)} comment(s)`,
+  });
+
+  // E3-E6: Workspace artifact checks (only if workspace is known)
+  if (workspaceDir && existsSync(workspaceDir)) {
+    const files = listWorkspaceFiles(workspaceDir);
+    const fileList = files.join(", ");
+
+    // E3: Source files exist (.ts, .js, .py, .go files)
+    const sourceFiles = files.filter((f) => /\.(ts|js|py|go)$/.test(f) && !f.includes(".test.") && !f.includes(".spec.") && !f.includes("node_modules"));
+    results.push({
+      id: "E3",
+      label: "Source code files created",
+      passed: sourceFiles.length > 0,
+      detail: sourceFiles.length > 0 ? sourceFiles.slice(0, 5).join(", ") : `No source files in workspace. Files: ${fileList.slice(0, 200)}`,
+    });
+
+    // E4: Test files exist (.test.ts, .spec.ts, etc.)
+    const testFiles = files.filter((f) => /\.(test|spec)\.(ts|js|py)$/.test(f));
+    results.push({
+      id: "E4",
+      label: "Test files created",
+      passed: testFiles.length > 0,
+      detail: testFiles.length > 0 ? testFiles.slice(0, 5).join(", ") : `No test files. Files: ${fileList.slice(0, 200)}`,
+    });
+
+    // E5: Package manifest exists (package.json, pyproject.toml, go.mod)
+    const hasManifest = files.some((f) => ["package.json", "pyproject.toml", "go.mod", "Cargo.toml"].includes(f));
+    results.push({
+      id: "E5",
+      label: "Package manifest exists",
+      passed: hasManifest,
+      detail: hasManifest ? "Found" : `No manifest file. Files: ${fileList.slice(0, 200)}`,
+    });
+
+    // E6: Test script configured (check package.json scripts.test or similar)
+    let hasTestScript = false;
+    const pkgJsonPath = join(workspaceDir, "package.json");
+    if (existsSync(pkgJsonPath)) {
+      try {
+        const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf-8")) as Record<string, unknown>;
+        const scripts = pkg.scripts as Record<string, string> | undefined;
+        hasTestScript = Boolean(scripts?.test && scripts.test !== "echo \"Error: no test specified\" && exit 1");
+      } catch { /* parse error — fail gracefully */ }
+    }
+    results.push({
+      id: "E6",
+      label: "Test script configured in manifest",
+      passed: hasTestScript,
+      detail: hasTestScript ? "scripts.test found" : "No test script in package.json",
+    });
+  } else {
+    results.push({ id: "E3", label: "Source code files created", passed: false, detail: "Workspace dir unknown or missing" });
+    results.push({ id: "E4", label: "Test files created", passed: false, detail: "Workspace dir unknown or missing" });
+    results.push({ id: "E5", label: "Package manifest exists", passed: false, detail: "Workspace dir unknown or missing" });
+    results.push({ id: "E6", label: "Test script configured in manifest", passed: false, detail: "Workspace dir unknown or missing" });
+  }
+
+  return results;
+}
+
+/**
+ * Validate review-phase invariants: QA agent reviewed the code.
+ */
+function validateReviewPhaseInvariants(
+  traces: PhaseTrace[],
+): InvariantResult[] {
+  const results: InvariantResult[] = [];
+  const reviewTraces = traces.filter((t) => t.phase === "review");
+
+  if (reviewTraces.length === 0) {
+    results.push({ id: "R1", label: "Review phase ran", passed: false, detail: "No review-phase traces" });
+    return results;
+  }
+
+  // R1: Review phase heartbeat(s) succeeded
+  const allSucceeded = reviewTraces.every((t) => t.heartbeatStatus === "succeeded");
+  results.push({
+    id: "R1",
+    label: "Review phase heartbeat(s) succeeded",
+    passed: allSucceeded,
+    detail: reviewTraces.map((t) => `${t.agentKey}:${t.heartbeatStatus}`).join(", "),
+  });
+
+  // R2: Reviewer posted comments (review findings)
+  const totalComments = reviewTraces.reduce((s, t) => s + t.commentCount, 0);
+  results.push({
+    id: "R2",
+    label: "Reviewer posted review comments",
+    passed: totalComments > 0,
+    detail: `${totalComments} comment(s)`,
+  });
+
+  // R3: Review comments are substantive
+  const totalChars = reviewTraces.reduce((s, t) => s + t.totalCommentChars, 0);
+  results.push({
+    id: "R3",
+    label: "Review comments are substantive",
+    passed: totalChars > 200,
+    detail: `${totalChars} chars`,
+  });
+
+  return results;
+}
+
+/**
+ * Try to run tests in the workspace and check if they pass.
+ *
+ * Returns an InvariantResult. Only runs if a test script is configured.
+ * Uses a short timeout (60s) to avoid blocking the E2E test.
+ */
+function verifyTestsPass(workspaceDir: string | undefined): InvariantResult {
+  if (!workspaceDir || !existsSync(workspaceDir)) {
+    return { id: "E7", label: "Tests pass in workspace", passed: false, detail: "Workspace dir unknown or missing" };
+  }
+
+  const pkgJsonPath = join(workspaceDir, "package.json");
+  if (!existsSync(pkgJsonPath)) {
+    return { id: "E7", label: "Tests pass in workspace", passed: false, detail: "No package.json found" };
+  }
+
+  try {
+    const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf-8")) as Record<string, unknown>;
+    const scripts = pkg.scripts as Record<string, string> | undefined;
+    if (!scripts?.test || scripts.test === "echo \"Error: no test specified\" && exit 1") {
+      return { id: "E7", label: "Tests pass in workspace", passed: false, detail: "No test script configured" };
+    }
+
+    // Install dependencies first (if node_modules doesn't exist)
+    const nodeModulesPath = join(workspaceDir, "node_modules");
+    if (!existsSync(nodeModulesPath)) {
+      try {
+        log("🔧", "Installing workspace dependencies for test verification...");
+        execSync("npm install --ignore-scripts 2>&1", { cwd: workspaceDir, timeout: 60_000, encoding: "utf-8" });
+      } catch (installErr) {
+        const msg = installErr instanceof Error ? installErr.message : String(installErr);
+        return { id: "E7", label: "Tests pass in workspace", passed: false, detail: `npm install failed: ${msg.slice(0, 200)}`, soft: true };
+      }
+    }
+
+    // Run tests with a timeout
+    log("🧪", "Running workspace tests for verification...");
+    const output = execSync("npm test 2>&1", { cwd: workspaceDir, timeout: 60_000, encoding: "utf-8" });
+    const passed = !output.includes("FAIL") || output.includes("Tests passed") || output.includes("✓");
+    log(passed ? "✅" : "⚠️ ", `Test output (last 200 chars): ${output.slice(-200)}`);
+    return { id: "E7", label: "Tests pass in workspace", passed: true, detail: `npm test succeeded`, soft: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Test failures are expected during review cycles — this is a soft check
+    return { id: "E7", label: "Tests pass in workspace", passed: false, detail: `npm test failed: ${msg.slice(0, 200)}`, soft: true };
+  }
+}
+
+/**
+ * List files in a workspace directory (non-recursive, top-level only + one level deep).
+ * Excludes node_modules, .git, etc.
+ */
+function listWorkspaceFiles(dir: string): string[] {
+  const IGNORE = new Set(["node_modules", ".git", "dist", "coverage", ".nyc_output", ".cache"]);
+  const files: string[] = [];
+
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (IGNORE.has(entry.name)) continue;
+      if (entry.isFile()) {
+        files.push(entry.name);
+      } else if (entry.isDirectory()) {
+        // One level deep
+        try {
+          const subDir = join(dir, entry.name);
+          for (const subEntry of readdirSync(subDir, { withFileTypes: true })) {
+            if (subEntry.isFile()) {
+              files.push(`${entry.name}/${subEntry.name}`);
+            }
+          }
+        } catch { /* skip unreadable subdirs */ }
+      }
+    }
+  } catch { /* skip unreadable dir */ }
+
+  return files;
 }
 
 function runSoftAssertions(
@@ -695,8 +1000,30 @@ function runSoftAssertions(
   // S4: Specialist count ≤ 8
   results.push({ id: "S4", label: "Specialist count reasonable", passed: subIssues.length <= 8, detail: `${subIssues.length} sub-issue(s)`, soft: true });
 
-  // S5: Total time < 15 min
-  results.push({ id: "S5", label: "Total time < 15 minutes", passed: totalTimeSec < 900, detail: `${Math.floor(totalTimeSec / 60)}m${totalTimeSec % 60}s`, soft: true });
+  // S5: Total time reasonable (15 min for spec-only, 30 min for full pipeline)
+  const timeLimit = FLAGS.specOnly ? 900 : 1800;
+  const timeLimitLabel = FLAGS.specOnly ? "15 minutes" : "30 minutes";
+  results.push({ id: "S5", label: `Total time < ${timeLimitLabel}`, passed: totalTimeSec < timeLimit, detail: `${Math.floor(totalTimeSec / 60)}m${totalTimeSec % 60}s`, soft: true });
+
+  // ── Execute+Review soft assertions (full pipeline only) ──
+  if (!FLAGS.specOnly) {
+    // S6: Execute comments reference implementation artifacts
+    const execTerms = ["implemented", "created", "wrote", "function", "export", "module", "test", "package.json", "npm", "vitest"];
+    const ec = commentsByPhase.get("execute") ?? [];
+    const s6 = ec.some((c) => execTerms.some((t) => c.toLowerCase().includes(t.toLowerCase())));
+    results.push({ id: "S6", label: "Execute comments reference implementation", passed: s6 || ec.length === 0, detail: s6 ? "Found" : ec.length === 0 ? "No execute comments" : "Missing", soft: true });
+
+    // S7: Review comments reference code quality
+    const reviewTerms = ["review", "finding", "approved", "passed", "quality", "issue", "fix", "severity", "recommendation"];
+    const rvc = commentsByPhase.get("review") ?? [];
+    const s7 = rvc.some((c) => reviewTerms.some((t) => c.toLowerCase().includes(t.toLowerCase())));
+    results.push({ id: "S7", label: "Review comments reference code quality", passed: s7 || rvc.length === 0, detail: s7 ? "Found" : rvc.length === 0 ? "No review comments" : "Missing", soft: true });
+
+    // S8: Execute issues reach done status
+    const execTraces = traces.filter((t) => t.phase === "execute");
+    const execDone = execTraces.every((t) => t.issueStatus === "done");
+    results.push({ id: "S8", label: "Execute issues completed", passed: execDone, detail: execTraces.map((t) => `${t.agentKey}:${t.issueStatus}`).join(", "), soft: true });
+  }
 
   return results;
 }
@@ -769,12 +1096,14 @@ function printTestReport(
   subIssueCount: number,
   phaseGroups: Map<BmadPhase, PaperclipIssue[]>,
 ): boolean {
-  header("Spec Pipeline E2E — Test Report");
+  header("Pipeline E2E — Test Report");
 
   const phaseSummary = [...phaseGroups.entries()]
     .map(([p, issues]) => `${p}(${issues.length})`)
     .join(" → ");
-  log("📋", `Seed: "${SPEC_ISSUE.title.slice(0, 60)}..."`);
+  const seedTitle = FLAGS.specOnly ? SPEC_ISSUE.title : FULL_PIPELINE_ISSUE.title;
+  log("📋", `Seed: "${seedTitle.slice(0, 60)}"`);
+  log("📋", `Pipeline: ${FLAGS.specOnly ? "spec-only" : "full"}`);
   log("📋", `CEO Plan: ${subIssueCount} tasks — ${phaseSummary}`);
   log("", "");
 
@@ -950,6 +1279,12 @@ async function runFull(): Promise<boolean> {
     inv.id === "C2" ? costInvariant : inv,
   );
 
+  // Execute+review phase invariants (if phases were run)
+  const hasExecutePhase = traces.some((t) => t.phase === "execute");
+  const fullModeExecuteInvariants = hasExecutePhase ? validateExecutePhaseInvariants(traces, targetWorkspaceDir) : [];
+  const fullModeReviewInvariants = traces.some((t) => t.phase === "review") ? validateReviewPhaseInvariants(traces) : [];
+  const fullModeTestResult = hasExecutePhase ? verifyTestsPass(targetWorkspaceDir) : null;
+
   const totalTimeSec = Math.round((Date.now() - startTime) / 1000);
   const softAssertions = runSoftAssertions(traces, subIssues, totalTimeSec);
 
@@ -957,6 +1292,9 @@ async function runFull(): Promise<boolean> {
     ...delegationInvariants,
     ...phaseInvariants,
     ...crossWithRealCost,
+    ...fullModeExecuteInvariants,
+    ...fullModeReviewInvariants,
+    ...(fullModeTestResult ? [fullModeTestResult] : []),
     ...softAssertions,
   ];
 
@@ -1057,9 +1395,11 @@ async function runAutonomous(): Promise<boolean> {
 
   // 3. Create seed issue assigned to CEO, status=todo
   //    This triggers Paperclip's issue.create wakeup on CEO
-  const seedIssue = await createIssue(SPEC_ISSUE, "autonomous");
+  //    Use FULL_PIPELINE_ISSUE unless --spec-only is set
+  const seedSpec = FLAGS.specOnly ? SPEC_ISSUE : FULL_PIPELINE_ISSUE;
+  const seedIssue = await createIssue(seedSpec, "autonomous");
   await paperclip("PATCH", `/api/issues/${seedIssue.id}`, { status: "todo" });
-  log("🚀", "Seed issue created and assigned to CEO — pipeline is self-driving now");
+  log("🚀", `Seed issue created (${FLAGS.specOnly ? "spec-only" : "full pipeline"}) — pipeline is self-driving now`);
 
   // 4. Wait for CEO to create sub-issues
   let subIssues: PaperclipIssue[] = [];
@@ -1095,24 +1435,26 @@ async function runAutonomous(): Promise<boolean> {
     log("  📌", `[${phase}] ${issue.title} → ${agentKey} [${issue.status}]${depInfo}`);
   }
 
-  // 5. Wait for all spec-phase sub-issues to reach "done"
-  // Build initial specIssueIds from the stable snapshot (post-CEO-heartbeat).
+  // 5. Wait for all tracked-phase sub-issues to reach "done"
+  // Build initial trackedIssueIds from the stable snapshot (post-CEO-heartbeat).
   // waitForPipelineCompletionViaWebSocket also discovers new sub-issues dynamically
   // (created during CEO re-evaluation) via the bmadPhase metadata filter.
+  const trackedPhases = activePipelinePhases();
+  const trackedPhaseSet = new Set(trackedPhases as string[]);
   const specIssueIds = new Set(
     subIssues
       .filter((i) => {
         const phase = (i.metadata as Record<string, string>)?.bmadPhase;
-        return phase && ["research", "define", "plan"].includes(phase);
+        return phase && trackedPhaseSet.has(phase);
       })
       .map((i) => i.id),
   );
-  log("📋", `Tracking ${specIssueIds.size} spec-phase sub-issues for completion`);
+  log("📋", `Tracking ${specIssueIds.size} sub-issues for completion (phases: ${trackedPhases.join(", ")})`);
 
   if (wsConn) {
     // ── WebSocket-driven: stream events and track status changes in real time ──
     await waitForPipelineCompletionViaWebSocket(
-      wsConn, seedIssue.id, specIssueIds, FLAGS.timeout,
+      wsConn, seedIssue.id, specIssueIds, trackedPhaseSet, FLAGS.timeout,
     );
     wsConn.close();
   } else {
@@ -1122,11 +1464,11 @@ async function runAutonomous(): Promise<boolean> {
     let pollExitReason = "timeout";
     while (Date.now() < pipelineDeadline) {
       const current = await findSubIssues(seedIssue.id);
-      // Dynamic discovery: include original IDs + any new spec-phase issues
+      // Dynamic discovery: include original IDs + any new tracked-phase issues
       const specCurrent = current.filter((i) => {
         if (specIssueIds.has(i.id)) return true;
         const phase = (i.metadata as Record<string, string>)?.bmadPhase;
-        return phase && ["research", "define", "plan"].includes(phase);
+        return phase && trackedPhaseSet.has(phase);
       });
 
       const statusMap = specCurrent
@@ -1233,12 +1575,29 @@ async function runAutonomous(): Promise<boolean> {
   const crossWithRealCost = crossPhaseInvariants.map((inv) =>
     inv.id === "C2" ? costInvariant : inv,
   );
+
+  // Execute+review phase invariants (full pipeline only)
+  let executeInvariants: InvariantResult[] = [];
+  let reviewInvariants: InvariantResult[] = [];
+  let testResult: InvariantResult | null = null;
+
+  if (!FLAGS.specOnly) {
+    executeInvariants = validateExecutePhaseInvariants(traces, targetWorkspaceDir);
+    reviewInvariants = validateReviewPhaseInvariants(traces);
+
+    // Try running tests in the workspace (soft check)
+    testResult = verifyTestsPass(targetWorkspaceDir);
+  }
+
   const totalTimeSec = Math.round((Date.now() - startTime) / 1000);
   const softAssertions = runSoftAssertions(traces, subIssues, totalTimeSec);
   const allInvariants = [
     ...delegationInvariants,
     ...phaseInvariants,
     ...crossWithRealCost,
+    ...executeInvariants,
+    ...reviewInvariants,
+    ...(testResult ? [testResult] : []),
     ...softAssertions,
   ];
 
@@ -1374,6 +1733,7 @@ async function waitForPipelineCompletionViaWebSocket(
   wsConn: ReturnType<typeof connectPaperclipWebSocket>,
   parentIssueId: string,
   specIssueIds: Set<string>,
+  trackedPhaseSet: Set<string>,
   timeoutMs: number,
 ): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -1395,12 +1755,12 @@ async function waitForPipelineCompletionViaWebSocket(
       // Dynamic discovery: re-fetch sub-issues to catch new ones from CEO re-eval
       const current = await findSubIssues(parentIssueId);
 
-      // Build the spec-phase set dynamically — includes original IDs plus any
+      // Build the tracked-phase set dynamically — includes original IDs plus any
       // new sub-issues created during CEO re-evaluation
       const specCurrent = current.filter((i) => {
         if (specIssueIds.has(i.id)) return true;
         const phase = (i.metadata as Record<string, string>)?.bmadPhase;
-        return phase && ["research", "define", "plan"].includes(phase);
+        return phase && trackedPhaseSet.has(phase);
       });
 
       const statusMap = specCurrent
@@ -1525,13 +1885,15 @@ async function waitForPipelineCompletionViaWebSocket(
 
 async function main(): Promise<void> {
   const mode = FLAGS.smoke ? "smoke" : FLAGS.autonomous ? "autonomous" : "full";
+  const pipelineScope = FLAGS.specOnly ? "spec-only (research→define→plan)" : "full (research→define→plan→execute→review)";
 
   console.log("\n🧪 BMAD Copilot Factory — E2E Test");
   console.log(`   Paperclip: ${PAPERCLIP_URL}`);
   console.log(`   Company:   ${COMPANY_ID}`);
   console.log(`   Mode:      ${mode}${FLAGS.stopAfter ? ` (stop-after=${FLAGS.stopAfter})` : ""}`);
+  console.log(`   Pipeline:  ${pipelineScope}`);
   console.log(`   Timeout:   ${FLAGS.timeout / 60_000} min`);
-  console.log(`   Flags:     ${FLAGS.ceoOnly ? "--ceo-only " : ""}${FLAGS.skipCleanup ? "--skip-cleanup " : ""}${FLAGS.verbose ? "--verbose" : ""}`);
+  console.log(`   Flags:     ${FLAGS.ceoOnly ? "--ceo-only " : ""}${FLAGS.specOnly ? "--spec-only " : ""}${FLAGS.skipCleanup ? "--skip-cleanup " : ""}${FLAGS.verbose ? "--verbose" : ""}`);
   console.log();
 
   setVerbose(FLAGS.verbose);

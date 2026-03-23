@@ -29,6 +29,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# ── Load .env (proxy, OTel, etc.) ───────────────────────────────────────────
+if [ -f "$PROJECT_ROOT/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$PROJECT_ROOT/.env"
+  set +a
+fi
+
 PAPERCLIP_REPO="${PAPERCLIP_REPO:-$(dirname "$PROJECT_ROOT")/paperclip}"
 PG_CONTAINER="${PG_CONTAINER:-bmad_copilot_rt-postgres-1}"
 PG_USER="${POSTGRES_USER:-paperclip}"
@@ -198,25 +207,44 @@ if [ "$FLAG_BG" = true ]; then
   info "Starting Paperclip in background..."
   nohup $NODE_CMD > /tmp/paperclip-server.log 2>&1 &
   PID=$!
-  sleep 3
-
-  if ! kill -0 "$PID" 2>/dev/null; then
-    fail "Paperclip failed to start. Check /tmp/paperclip-server.log"
-  fi
-  ok "Paperclip running (PID=$PID, log=/tmp/paperclip-server.log)"
 else
-  # For foreground mode, we need to start Paperclip in background temporarily
-  # to run setup, then exec into it at the end
+  # For foreground mode, start in background temporarily for setup,
+  # then exec into it at the end
   info "Starting Paperclip temporarily for setup..."
   nohup $NODE_CMD > /tmp/paperclip-server.log 2>&1 &
   BG_PID=$!
-  sleep 3
-
-  if ! kill -0 "$BG_PID" 2>/dev/null; then
-    fail "Paperclip failed to start. Check /tmp/paperclip-server.log"
-  fi
-  ok "Paperclip started (PID=$BG_PID)"
+  PID=$BG_PID
 fi
+
+# Wait for Paperclip API to be ready (up to 30s)
+info "Waiting for Paperclip API to be ready..."
+HEALTH_OK=false
+for i in $(seq 1 30); do
+  if curl -sf "http://localhost:${PORT}/api/health" >/dev/null 2>&1; then
+    HEALTH_OK=true
+    break
+  fi
+  # Check process is still alive
+  if ! kill -0 "$PID" 2>/dev/null; then
+    echo ""
+    echo "  --- Last 20 lines of /tmp/paperclip-server.log ---"
+    tail -20 /tmp/paperclip-server.log 2>/dev/null || true
+    echo "  ---------------------------------------------------"
+    fail "Paperclip process died during startup (PID=$PID)"
+  fi
+  printf "."
+  sleep 1
+done
+echo ""
+
+if [ "$HEALTH_OK" = false ]; then
+  echo "  --- Last 20 lines of /tmp/paperclip-server.log ---"
+  tail -20 /tmp/paperclip-server.log 2>/dev/null || true
+  echo "  ---------------------------------------------------"
+  fail "Paperclip API not ready after 30s. Check /tmp/paperclip-server.log"
+fi
+
+ok "Paperclip API ready (PID=$PID, log=/tmp/paperclip-server.log)"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Step 6: Ensure company + agents are provisioned
@@ -225,10 +253,19 @@ header "Step 6: Ensure company + agents"
 
 cd "$PROJECT_ROOT"
 
-# Pass OTel env vars through so agent configs get OTEL_* in adapterConfig.env
+# Pass OTel + proxy env vars through so agent configs get them in adapterConfig.env
 SETUP_ENV=""
 if [ "${OTEL_ENABLED:-}" = "true" ]; then
   SETUP_ENV="OTEL_ENABLED=true OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4318}"
+fi
+if [ -n "${HTTPS_PROXY:-}" ]; then
+  SETUP_ENV="$SETUP_ENV HTTPS_PROXY=$HTTPS_PROXY"
+fi
+if [ -n "${HTTP_PROXY:-}" ]; then
+  SETUP_ENV="$SETUP_ENV HTTP_PROXY=$HTTP_PROXY"
+fi
+if [ -n "${NO_PROXY:-}" ]; then
+  SETUP_ENV="$SETUP_ENV NO_PROXY=$NO_PROXY"
 fi
 
 if [ -n "$SETUP_ENV" ]; then

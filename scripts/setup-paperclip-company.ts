@@ -157,6 +157,27 @@ const OTEL_ENV: Record<string, string> = {
     : {}),
 };
 
+
+/**
+ * Proxy environment variables injected into every agent's process adapter env.
+ * Required when running on corporate networks where outbound HTTPS to GitHub
+ * (Copilot API) must go through a proxy.
+ *
+ * Set HTTPS_PROXY / HTTP_PROXY in .env or shell environment.
+ * NO_PROXY defaults to localhost to avoid proxying local Paperclip calls.
+ */
+const PROXY_ENV: Record<string, string> = {
+  ...(process.env.HTTPS_PROXY || process.env.https_proxy
+    ? { HTTPS_PROXY: process.env.HTTPS_PROXY || process.env.https_proxy || "" }
+    : {}),
+  ...(process.env.HTTP_PROXY || process.env.http_proxy
+    ? { HTTP_PROXY: process.env.HTTP_PROXY || process.env.http_proxy || "" }
+    : {}),
+  ...(process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy
+    ? { NO_PROXY: process.env.NO_PROXY || process.env.no_proxy || "localhost,127.0.0.1" }
+    : {}),
+};
+
 /**
  * Complete BMAD agent roster.
  * Order matters — agents are created top-down so `reportsTo` can resolve.
@@ -549,6 +570,14 @@ async function ensureProject(): Promise<void> {
 async function createAgents(): Promise<Map<string, string>> {
   header("Step 3: Create BMAD Agents");
 
+  // Log injected env for transparency
+  if (Object.keys(PROXY_ENV).length > 0) {
+    log("🌐", `Proxy env: HTTPS_PROXY=${PROXY_ENV.HTTPS_PROXY ?? "—"}, NO_PROXY=${PROXY_ENV.NO_PROXY ?? "—"}`);
+  }
+  if (Object.keys(OTEL_ENV).length > 0) {
+    log("��", `OTel env: OTEL_ENABLED=${OTEL_ENV.OTEL_ENABLED ?? "—"}`);
+  }
+
   // Fetch existing agents to avoid duplicates
   const existing = await paperclip<PaperclipAgent[]>(
     "GET",
@@ -588,6 +617,7 @@ async function createAgents(): Promise<Map<string, string>> {
       timeoutSec: PROCESS_TIMEOUT_SEC,
       env: {
         ...OTEL_ENV,
+        ...PROXY_ENV,
       },
     };
 

@@ -87,6 +87,14 @@ export interface HeartbeatRun {
   };
 }
 
+export interface PaperclipProjectWorkspace {
+  id: string;
+  projectId: string;
+  name: string;
+  cwd: string | null;
+  isPrimary: boolean;
+}
+
 export interface PaperclipProject {
   id: string;
   name: string;
@@ -95,6 +103,7 @@ export interface PaperclipProject {
     effectiveLocalFolder?: string;
     localFolder?: string | null;
   };
+  workspaces?: PaperclipProjectWorkspace[];
 }
 
 export interface PaperclipAgent {
@@ -396,9 +405,12 @@ export function resolveAgentName(agentId: string): string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Ensure a dedicated Paperclip project exists for E2E runs.
- * Returns the project ID and the workspace directory (managedFolder)
- * where agent-generated code should land — NOT in this repo.
+ * Ensure a dedicated Paperclip project exists for E2E runs,
+ * WITH a project_workspace row so the file browser plugin and
+ * heartbeat workspace resolution both work correctly.
+ *
+ * Returns the project ID and the workspace directory where
+ * agent-generated code should land — NOT in this repo.
  */
 export async function ensureE2eProject(
   projectName: string,
@@ -410,6 +422,8 @@ export async function ensureE2eProject(
   let project = projects.find((p) => p.name === projectName);
 
   if (!project) {
+    // Resolve workspace directory from the managed path convention.
+    // We need to create the project first to get the ID, then create the workspace.
     project = await paperclip<PaperclipProject>(
       "POST",
       `/api/companies/${COMPANY_ID}/projects`,
@@ -420,16 +434,16 @@ export async function ensureE2eProject(
     log("♻️ ", "Reusing Paperclip project", { name: project.name, id: project.id });
   }
 
-  // Resolve workspace directory — Paperclip auto-creates a managedFolder
+  // Resolve workspace directory from Paperclip's codebase metadata
   const wsDir = project.codebase?.effectiveLocalFolder
     ?? project.codebase?.managedFolder;
 
   if (!wsDir) {
-    const allProjects = await paperclip<PaperclipProject[]>(
+    // Re-fetch in case the initial response was stale
+    const refetched = await paperclip<PaperclipProject>(
       "GET",
-      `/api/companies/${COMPANY_ID}/projects`,
+      `/api/projects/${project.id}`,
     );
-    const refetched = allProjects.find((p) => p.id === project!.id);
     const dir = refetched?.codebase?.effectiveLocalFolder
       ?? refetched?.codebase?.managedFolder;
     if (!dir) {
@@ -438,10 +452,50 @@ export async function ensureE2eProject(
         `cannot isolate workspace. Raw codebase: ${JSON.stringify(refetched?.codebase)}`,
       );
     }
-    return { projectId: project.id, workspaceDir: dir };
+    // Use the refetched project for workspace check below
+    project = refetched;
   }
 
-  return { projectId: project.id, workspaceDir: wsDir };
+  const workspaceDir = project.codebase?.effectiveLocalFolder
+    ?? project.codebase?.managedFolder
+    ?? wsDir!;
+
+  // Ensure a project_workspace row exists in the DB.
+  // Without this, the file browser plugin and heartbeat workspace resolution
+  // cannot find the workspace (they query project_workspaces table).
+  const existingWorkspaces = project.workspaces ?? [];
+  const hasWorkspaceRow = existingWorkspaces.length > 0;
+
+  if (!hasWorkspaceRow) {
+    const workspace = await paperclip<PaperclipProjectWorkspace>(
+      "POST",
+      `/api/projects/${project.id}/workspaces`,
+      {
+        name: projectName,
+        sourceType: "local_path",
+        cwd: workspaceDir,
+        isPrimary: true,
+      },
+    );
+    log("🆕", "Created project workspace row", { workspaceId: workspace.id, cwd: workspaceDir });
+  } else {
+    const primary = existingWorkspaces.find((w) => w.isPrimary) ?? existingWorkspaces[0];
+    log("♻️ ", "Project workspace row exists", {
+      workspaceId: primary.id,
+      cwd: primary.cwd ?? workspaceDir,
+    });
+    // If the existing workspace has a different cwd, update it
+    if (primary.cwd !== workspaceDir && workspaceDir) {
+      await paperclip(
+        "PATCH",
+        `/api/projects/${project.id}/workspaces/${primary.id}`,
+        { cwd: workspaceDir },
+      );
+      log("🔧", "Updated workspace cwd", { cwd: workspaceDir });
+    }
+  }
+
+  return { projectId: project.id, workspaceDir };
 }
 
 /**

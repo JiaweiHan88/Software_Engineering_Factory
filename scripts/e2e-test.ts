@@ -129,35 +129,34 @@ const SMOKE_ISSUE = {
 
 /** Complex spec-pipeline task that forces multi-phase delegation. */
 const SPEC_ISSUE = {
-  title: "Build a real-time vehicle telemetry dashboard for fleet managers",
+  title: "Build a CLI tool that converts CSV files to JSON",
   description: [
     "## Context",
-    "A fleet management company wants a dashboard that provides real-time visibility",
-    "into their vehicle fleet. This is a greenfield project with no existing infrastructure.",
+    "We need a small command-line utility that reads CSV files and outputs JSON.",
+    "This is a simple, well-defined project — no external APIs, no databases.",
     "",
-    "## High-Level Requirements",
-    "- Show live GPS positions, speed, fuel level, and engine diagnostics for each vehicle",
-    "- Support 10,000+ simultaneous vehicles with < 2 second end-to-end latency",
-    "- Role-based access control: fleet manager, driver, mechanic (different views)",
-    "- Integration with existing OBD-II diagnostic dongles (various manufacturers)",
-    "- Must work on mobile browsers (responsive) and desktop",
-    "- Dashboard should support historical playback and route visualization",
+    "## Requirements",
+    "- Accept a CSV file path as input, output JSON to stdout or a file",
+    "- Support custom delimiters (comma, semicolon, tab)",
+    "- Handle quoted fields and escaped characters correctly",
+    "- Include a --pretty flag for formatted output",
+    "- Provide a --headers flag to use the first row as object keys",
+    "- Exit with meaningful error codes (file not found, parse error, etc.)",
+    "- Single binary with no runtime dependencies (Node.js or Go)",
     "",
-    "## What Is NOT Decided Yet",
-    "- Tech stack (frontend framework, backend language, database)",
-    "- Communication protocol (WebSocket, SSE, MQTT, gRPC)",
-    "- Data architecture (time-series DB, event streaming, etc.)",
-    "- Deployment model (cloud provider, on-prem, hybrid)",
-    "- Budget and timeline are unknown",
+    "## Constraints",
+    "- Must handle files up to 100 MB without running out of memory (streaming)",
+    "- Should complete conversion of a 10 MB file in under 5 seconds",
     "",
     "## Scope",
     "**This issue covers SPECIFICATION ONLY — do not implement anything.**",
     "Deliver the following artifacts:",
-    "1. Research findings (market analysis + technical feasibility)",
+    "1. Brief research summary (existing tools, gaps, our differentiator)",
     "2. Product Requirements Document (PRD)",
-    "3. Architecture document (system design, data flow, technology choices)",
+    "3. Architecture document (module structure, data flow, error handling)",
     "4. Epic breakdown with prioritized stories",
     "",
+    "Keep each deliverable concise — this is a small utility, not an enterprise platform.",
     "Do NOT create implementation tasks, write code, or assign development work.",
   ].join("\n"),
   priority: "medium" as const,
@@ -676,13 +675,13 @@ function runSoftAssertions(
   }
 
   // S1: Research mentions domain terms
-  const domainTerms = ["telemetry", "fleet", "vehicle", "OBD", "GPS", "real-time", "dashboard"];
+  const domainTerms = ["CSV", "JSON", "CLI", "delimiter", "parser", "convert", "command-line", "streaming", "file"];
   const rc = commentsByPhase.get("research") ?? [];
   const s1 = rc.some((c) => domainTerms.some((t) => c.toLowerCase().includes(t.toLowerCase())));
   results.push({ id: "S1", label: "Research references domain terms", passed: s1 || rc.length === 0, detail: s1 ? "Found" : rc.length === 0 ? "No research comments" : "Missing", soft: true });
 
   // S2: Define mentions architecture patterns
-  const archTerms = ["websocket", "pub/sub", "mqtt", "rest", "grpc", "streaming", "time-series", "database", "api", "microservice", "event", "architecture"];
+  const archTerms = ["streaming", "parser", "module", "cli", "error", "stdin", "stdout", "pipe", "api", "architecture", "interface", "argument"];
   const dc = commentsByPhase.get("define") ?? [];
   const s2 = dc.some((c) => archTerms.some((t) => c.toLowerCase().includes(t.toLowerCase())));
   results.push({ id: "S2", label: "Define references architecture patterns", passed: s2 || dc.length === 0, detail: s2 ? "Found" : dc.length === 0 ? "No define comments" : "Missing", soft: true });
@@ -1066,8 +1065,8 @@ async function runAutonomous(): Promise<boolean> {
   let subIssues: PaperclipIssue[] = [];
 
   if (wsConn) {
-    // ── WebSocket-driven: wait for activity.logged events indicating issue creation ──
-    subIssues = await waitForSubIssuesViaWebSocket(wsConn, seedIssue.id, 5 * 60_000);
+    // ── WebSocket-driven: wait for CEO heartbeat to finish, then snapshot sub-issues ──
+    subIssues = await waitForSubIssuesViaWebSocket(wsConn, seedIssue.id, AGENTS.ceo, 5 * 60_000);
   } else {
     // ── Fallback: polling mode ──
     const ceoPollDeadline = Date.now() + 5 * 60_000;
@@ -1087,8 +1086,7 @@ async function runAutonomous(): Promise<boolean> {
   }
 
   // Log delegation plan
-  const phaseGroups = groupByPhase(subIssues);
-  log("📊", `CEO created ${subIssues.length} sub-issues: ${[...phaseGroups.keys()].join(" → ")}`);
+  log("📊", `CEO created ${subIssues.length} sub-issues`);
   for (const issue of subIssues) {
     const agentKey = issue.assigneeAgentId ? resolveAgentKey(issue.assigneeAgentId) : "?";
     const phase = (issue.metadata as Record<string, string>)?.bmadPhase ?? "?";
@@ -1098,6 +1096,9 @@ async function runAutonomous(): Promise<boolean> {
   }
 
   // 5. Wait for all spec-phase sub-issues to reach "done"
+  // Build initial specIssueIds from the stable snapshot (post-CEO-heartbeat).
+  // waitForPipelineCompletionViaWebSocket also discovers new sub-issues dynamically
+  // (created during CEO re-evaluation) via the bmadPhase metadata filter.
   const specIssueIds = new Set(
     subIssues
       .filter((i) => {
@@ -1106,6 +1107,7 @@ async function runAutonomous(): Promise<boolean> {
       })
       .map((i) => i.id),
   );
+  log("📋", `Tracking ${specIssueIds.size} spec-phase sub-issues for completion`);
 
   if (wsConn) {
     // ── WebSocket-driven: stream events and track status changes in real time ──
@@ -1117,9 +1119,15 @@ async function runAutonomous(): Promise<boolean> {
     // ── Fallback: polling mode ──
     const pipelineDeadline = Date.now() + FLAGS.timeout;
     let lastStatusLog = "";
+    let pollExitReason = "timeout";
     while (Date.now() < pipelineDeadline) {
       const current = await findSubIssues(seedIssue.id);
-      const specCurrent = current.filter((i) => specIssueIds.has(i.id));
+      // Dynamic discovery: include original IDs + any new spec-phase issues
+      const specCurrent = current.filter((i) => {
+        if (specIssueIds.has(i.id)) return true;
+        const phase = (i.metadata as Record<string, string>)?.bmadPhase;
+        return phase && ["research", "define", "plan"].includes(phase);
+      });
 
       const statusMap = specCurrent
         .map((i) => {
@@ -1129,25 +1137,33 @@ async function runAutonomous(): Promise<boolean> {
         .join(" | ");
 
       if (statusMap !== lastStatusLog) {
-        log("📊", `Pipeline status: ${statusMap}`);
+        log("📊", `Pipeline status: ${statusMap} (${specCurrent.length} spec issues)`);
         lastStatusLog = statusMap;
       }
 
-      const allDone = specCurrent.every(
+      const allDone = specCurrent.length > 0 && specCurrent.every(
         (i) => i.status === "done" || i.status === "cancelled",
       );
       if (allDone) {
+        pollExitReason = "all spec issues done/cancelled";
         log("✅", "All spec-phase sub-issues completed!");
         break;
       }
 
       await new Promise((r) => setTimeout(r, 15_000));
     }
+    log("🏁", `Polling exit: ${pollExitReason}`);
   }
 
   // 6. Collect traces from completed sub-issues (comments, status)
-  // Re-fetch sub-issues in case new ones were created during re-evaluation
+  // Re-fetch sub-issues to get the full set (including any created during re-evaluation)
   subIssues = await findSubIssues(seedIssue.id);
+  log("📊", `Final sub-issue count: ${subIssues.length} (was ${specIssueIds.size} spec-phase at step 5)`);
+
+  // Build phaseGroups from the final (complete) sub-issue set
+  const phaseGroups = groupByPhase(subIssues);
+  log("📋", `Final phases: ${[...phaseGroups.entries()].map(([p, issues]) => `${p}(${issues.length})`).join(" → ")}`);
+
   const traces: PhaseTrace[] = [];
   for (const issue of subIssues) {
     const phase =
@@ -1180,6 +1196,11 @@ async function runAutonomous(): Promise<boolean> {
       commentPreviews: comments.map((c) => c.body.split("\n")[0]),
     });
   }
+
+  // Sort traces by pipeline phase order for report readability and C1 invariant.
+  // In autonomous mode agents finish in arbitrary order, but the report and
+  // cross-phase checks should reflect logical pipeline ordering.
+  traces.sort((a, b) => PHASE_ORDER.indexOf(a.phase) - PHASE_ORDER.indexOf(b.phase));
 
   // 7. Run invariants
   const parentIssue = await paperclip<PaperclipIssue>(
@@ -1235,63 +1256,91 @@ async function runAutonomous(): Promise<boolean> {
 // ── WebSocket Event Helpers ──────────────────────────────────────────────────
 
 /**
- * Wait for the CEO to create sub-issues by listening for activity.logged events
- * on the WebSocket. Falls back to a one-shot API check every 30s as a safety net.
+ * Wait for the CEO to finish creating sub-issues.
+ *
+ * Strategy: wait for the CEO's heartbeat run to reach "succeeded" (or "failed")
+ * status via WebSocket, THEN snapshot sub-issues. This avoids the race condition
+ * where we snapshot mid-creation and only see a subset of the sub-issues.
+ *
+ * The CEO creates all sub-issues in a single heartbeat run, so "succeeded" means
+ * all sub-issues are guaranteed to exist.
+ *
+ * Falls back to a periodic API check every 30s as a safety net.
  */
 async function waitForSubIssuesViaWebSocket(
   wsConn: ReturnType<typeof connectPaperclipWebSocket>,
   parentIssueId: string,
+  ceoAgentId: string,
   timeoutMs: number,
 ): Promise<PaperclipIssue[]> {
   return new Promise<PaperclipIssue[]>((resolve) => {
     const deadline = Date.now() + timeoutMs;
     let resolved = false;
+    let ceoHeartbeatFinished = false;
+    let issueCreatedCount = 0;
 
-    // Listen for issue.created activity events or heartbeat completion
+    async function tryResolve(reason: string): Promise<void> {
+      if (resolved) return;
+      try {
+        const subIssues = await findSubIssues(parentIssueId);
+        if (subIssues.length > 0) {
+          resolved = true;
+          clearInterval(safetyInterval);
+          log("✅", `Sub-issues resolved (${reason}): ${subIssues.length} found`);
+          resolve(subIssues);
+        } else {
+          log("⚠️ ", `${reason} but findSubIssues returned 0 — will retry`);
+        }
+      } catch (err) {
+        log("⚠️ ", `findSubIssues failed after ${reason}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     wsConn.onEvent(async (event) => {
       if (resolved) return;
 
-      const isHeartbeatDone =
-        event.type === "heartbeat.run.status" &&
-        (event.payload.status === "succeeded" || event.payload.status === "failed");
-      const isIssueActivity =
-        event.type === "activity.logged" &&
-        event.payload.action === "issue.created";
-
-      if (isHeartbeatDone || isIssueActivity) {
-        log("🔔", `WS event: ${event.type} ${event.payload.action ?? event.payload.status ?? ""}`);
-
-        try {
-          const subIssues = await findSubIssues(parentIssueId);
-          if (subIssues.length > 0 && !resolved) {
-            resolved = true;
-            resolve(subIssues);
-          }
-        } catch {
-          // Non-fatal — will retry on next event
+      // Track CEO heartbeat completion — this is the primary signal
+      if (event.type === "heartbeat.run.status") {
+        const { status, agentId } = event.payload;
+        const isCeo = agentId === ceoAgentId;
+        if (isCeo && (status === "succeeded" || status === "failed")) {
+          log("🔔", `CEO heartbeat ${status} — snapshotting sub-issues`);
+          ceoHeartbeatFinished = true;
+          await tryResolve(`CEO heartbeat ${status}`);
+        } else if (isCeo && status === "running") {
+          log("🔔", "CEO heartbeat started");
         }
+        return;
+      }
+
+      // Track issue creation events (informational — don't resolve yet)
+      if (
+        event.type === "activity.logged" &&
+        event.payload.action === "issue.created"
+      ) {
+        issueCreatedCount++;
+        log("🔔", `Issue created event #${issueCreatedCount}`);
+        // Don't resolve here — wait for CEO heartbeat to finish
+        // so we get the complete set of sub-issues.
       }
     });
 
-    // Safety net: periodic check in case we missed an event
+    // Safety net: periodic check. If the CEO heartbeat event was missed
+    // (e.g., fired before WS listener registered), this catches it.
     const safetyInterval = setInterval(async () => {
       if (resolved || Date.now() > deadline) {
         clearInterval(safetyInterval);
         if (!resolved) {
           resolved = true;
-          resolve([]); // Timeout
+          log("⏰", `Sub-issue wait timed out (safety net). CEO finished: ${ceoHeartbeatFinished}, events seen: ${issueCreatedCount}`);
+          resolve([]);
         }
         return;
       }
-      try {
-        const subIssues = await findSubIssues(parentIssueId);
-        if (subIssues.length > 0 && !resolved) {
-          resolved = true;
-          clearInterval(safetyInterval);
-          resolve(subIssues);
-        }
-      } catch {
-        // Non-fatal
+      // Only resolve on safety net if CEO heartbeat already finished
+      // OR if we've seen issue creation events (fallback for missed heartbeat event)
+      if (ceoHeartbeatFinished || issueCreatedCount > 0) {
+        await tryResolve(`safety net (ceoFinished=${ceoHeartbeatFinished}, events=${issueCreatedCount})`);
       }
     }, 30_000);
 
@@ -1300,6 +1349,7 @@ async function waitForSubIssuesViaWebSocket(
       if (!resolved) {
         resolved = true;
         clearInterval(safetyInterval);
+        log("⏰", `Sub-issue wait hard timeout (${timeoutMs / 1000}s). CEO finished: ${ceoHeartbeatFinished}, events seen: ${issueCreatedCount}`);
         resolve([]);
       }
     }, timeoutMs);
@@ -1313,7 +1363,12 @@ async function waitForSubIssuesViaWebSocket(
  * - heartbeat.run.status (succeeded/failed) → re-check issue statuses
  * - activity.logged (issue.updated) → re-check issue statuses
  *
+ * Uses dynamic sub-issue discovery: re-fetches sub-issues from the API on each
+ * check, so new sub-issues created during CEO re-evaluation are automatically
+ * included in the completion criteria.
+ *
  * Also logs heartbeat run events and comments for real-time pipeline visibility.
+ * Every exit path logs a diagnostic reason for post-mortem analysis.
  */
 async function waitForPipelineCompletionViaWebSocket(
   wsConn: ReturnType<typeof connectPaperclipWebSocket>,
@@ -1325,10 +1380,28 @@ async function waitForPipelineCompletionViaWebSocket(
     const deadline = Date.now() + timeoutMs;
     let resolved = false;
     let lastStatusLog = "";
+    let heartbeatEvents = 0;
+    let statusChangeEvents = 0;
 
-    async function checkAndLogStatus(): Promise<boolean> {
+    function exitWith(reason: string): void {
+      if (resolved) return;
+      resolved = true;
+      clearInterval(safetyInterval);
+      log("🏁", `Pipeline wait exited: ${reason} (heartbeats=${heartbeatEvents}, statusChanges=${statusChangeEvents})`);
+      resolve();
+    }
+
+    async function checkAndLogStatus(trigger: string): Promise<boolean> {
+      // Dynamic discovery: re-fetch sub-issues to catch new ones from CEO re-eval
       const current = await findSubIssues(parentIssueId);
-      const specCurrent = current.filter((i) => specIssueIds.has(i.id));
+
+      // Build the spec-phase set dynamically — includes original IDs plus any
+      // new sub-issues created during CEO re-evaluation
+      const specCurrent = current.filter((i) => {
+        if (specIssueIds.has(i.id)) return true;
+        const phase = (i.metadata as Record<string, string>)?.bmadPhase;
+        return phase && ["research", "define", "plan"].includes(phase);
+      });
 
       const statusMap = specCurrent
         .map((i) => {
@@ -1338,8 +1411,13 @@ async function waitForPipelineCompletionViaWebSocket(
         .join(" | ");
 
       if (statusMap !== lastStatusLog) {
-        log("📊", `Pipeline status: ${statusMap}`);
+        log("📊", `Pipeline status [${trigger}]: ${statusMap} (${specCurrent.length} spec issues)`);
         lastStatusLog = statusMap;
+      }
+
+      if (specCurrent.length === 0) {
+        log("⚠️ ", `No spec-phase sub-issues found (trigger: ${trigger})`);
+        return false;
       }
 
       return specCurrent.every(
@@ -1357,16 +1435,15 @@ async function waitForPipelineCompletionViaWebSocket(
           const agentKey = typeof agentId === "string" ? resolveAgentKey(agentId) : "?";
           log("🔔", `Agent ${agentKey} heartbeat started`);
         } else if (status === "succeeded" || status === "failed") {
+          heartbeatEvents++;
           const agentKey = typeof agentId === "string" ? resolveAgentKey(agentId) : "?";
           const icon = status === "succeeded" ? "✅" : "❌";
-          log("🔔", `${icon} Agent ${agentKey} heartbeat ${status}`);
+          log("🔔", `${icon} Agent ${agentKey} heartbeat ${status} (event #${heartbeatEvents})`);
 
           try {
-            const allDone = await checkAndLogStatus();
-            if (allDone && !resolved) {
-              resolved = true;
-              log("✅", "All spec-phase sub-issues completed!");
-              resolve();
+            const allDone = await checkAndLogStatus(`heartbeat.${agentKey}.${status}`);
+            if (allDone) {
+              exitWith(`all spec issues done after ${agentKey} heartbeat ${status}`);
             }
           } catch (err) {
             log("⚠️ ", `Status check failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1384,16 +1461,15 @@ async function waitForPipelineCompletionViaWebSocket(
           const details = event.payload.details as Record<string, unknown> | undefined;
           const newStatus = details?.status;
           if (newStatus) {
+            statusChangeEvents++;
             const agentKey = typeof agentId === "string" ? resolveAgentKey(agentId) : "system";
-            log("🔔", `Issue updated → ${newStatus} (by ${agentKey})`);
+            log("🔔", `Issue updated → ${newStatus} (by ${agentKey}, event #${statusChangeEvents})`);
 
             if (newStatus === "done" || newStatus === "cancelled") {
               try {
-                const allDone = await checkAndLogStatus();
-                if (allDone && !resolved) {
-                  resolved = true;
-                  log("✅", "All spec-phase sub-issues completed!");
-                  resolve();
+                const allDone = await checkAndLogStatus(`issue.${newStatus}.by.${agentKey}`);
+                if (allDone) {
+                  exitWith(`all spec issues done after issue → ${newStatus} by ${agentKey}`);
                 }
               } catch (err) {
                 log("⚠️ ", `Status check failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1419,19 +1495,15 @@ async function waitForPipelineCompletionViaWebSocket(
       if (resolved || Date.now() > deadline) {
         clearInterval(safetyInterval);
         if (!resolved) {
-          resolved = true;
-          log("⏰", "Pipeline timeout reached");
-          resolve();
+          exitWith(`safety-net deadline (${timeoutMs / 1000}s elapsed)`);
         }
         return;
       }
       try {
-        const allDone = await checkAndLogStatus();
-        if (allDone && !resolved) {
-          resolved = true;
-          clearInterval(safetyInterval);
-          log("✅", "All spec-phase sub-issues completed! (safety check)");
-          resolve();
+        log("🔍", "Safety-net status check...");
+        const allDone = await checkAndLogStatus("safety-net-60s");
+        if (allDone) {
+          exitWith("all spec issues done (safety-net check)");
         }
       } catch {
         // Non-fatal
@@ -1441,10 +1513,7 @@ async function waitForPipelineCompletionViaWebSocket(
     // Hard timeout
     setTimeout(() => {
       if (!resolved) {
-        resolved = true;
-        clearInterval(safetyInterval);
-        log("⏰", "Pipeline timeout reached");
-        resolve();
+        exitWith(`hard timeout (${timeoutMs / 1000}s)`);
       }
     }, timeoutMs);
   });

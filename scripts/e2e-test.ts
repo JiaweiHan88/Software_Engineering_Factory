@@ -971,35 +971,117 @@ async function runFull(): Promise<boolean> {
 // ── Autonomous Pipeline ──────────────────────────────────────────────────────
 
 /**
+ * Paperclip LiveEvent shape (from @paperclipai/shared).
+ * Received on the company WebSocket: /api/companies/:id/events/ws
+ */
+interface LiveEvent {
+  id: number;
+  companyId: string;
+  type: string;
+  createdAt: string;
+  payload: Record<string, unknown>;
+}
+
+/**
+ * Connect to Paperclip's company WebSocket for real-time event streaming.
+ *
+ * Uses the native Node.js WebSocket API (stable since Node 22).
+ * In local_trusted mode no auth is needed — Paperclip auto-grants board access.
+ *
+ * @returns Object with { onEvent, close } — call onEvent to register a listener,
+ *          close() when done.
+ */
+function connectPaperclipWebSocket(): {
+  onEvent: (listener: (event: LiveEvent) => void) => void;
+  close: () => void;
+  ready: Promise<void>;
+} {
+  const wsUrl = PAPERCLIP_URL.replace(/^http/, "ws") + `/api/companies/${COMPANY_ID}/events/ws`;
+  const ws = new WebSocket(wsUrl);
+  const listeners: Array<(event: LiveEvent) => void> = [];
+
+  const ready = new Promise<void>((resolve, reject) => {
+    ws.addEventListener("open", () => {
+      log("🔌", `WebSocket connected to ${wsUrl}`);
+      resolve();
+    });
+    ws.addEventListener("error", (err) => {
+      log("⚠️ ", `WebSocket error: ${(err as ErrorEvent).message ?? "unknown"}`);
+      reject(err);
+    });
+  });
+
+  ws.addEventListener("message", (evt) => {
+    try {
+      const event = JSON.parse(String(evt.data)) as LiveEvent;
+      for (const listener of listeners) {
+        listener(event);
+      }
+    } catch {
+      // Ignore malformed messages
+    }
+  });
+
+  ws.addEventListener("close", () => {
+    log("🔌", "WebSocket disconnected");
+  });
+
+  return {
+    onEvent: (listener) => listeners.push(listener),
+    close: () => ws.close(),
+    ready,
+  };
+}
+
+/**
  * Autonomous mode: resume all agents, create a seed issue, and let Paperclip's
- * wakeOnDemand pipeline self-drive. Poll for completion instead of invoking
- * heartbeats explicitly.
+ * wakeOnDemand pipeline self-drive. Uses WebSocket for real-time event streaming
+ * instead of polling — reacts instantly to heartbeat completions and status changes.
  */
 async function runAutonomous(): Promise<boolean> {
   const startTime = Date.now();
   await setup("bmad-e2e-autonomous");
 
-  // 1. Resume ALL agents (critical — wakeOnDemand needs active agents)
+  // 1. Connect WebSocket BEFORE creating issues (don't miss events)
+  let wsConn: ReturnType<typeof connectPaperclipWebSocket> | null = null;
+  try {
+    wsConn = connectPaperclipWebSocket();
+    await wsConn.ready;
+  } catch {
+    log("⚠️ ", "WebSocket connection failed — falling back to polling mode");
+    wsConn = null;
+  }
+
+  // 2. Resume ALL agents (critical — wakeOnDemand needs active agents)
   await resumeAllAgents();
   log("▶️", "All agents resumed — wakeOnDemand will drive the pipeline");
 
-  // 2. Create seed issue assigned to CEO, status=todo
+  // 3. Create seed issue assigned to CEO, status=todo
   //    This triggers Paperclip's issue.create wakeup on CEO
   const seedIssue = await createIssue(SPEC_ISSUE, "autonomous");
   await paperclip("PATCH", `/api/issues/${seedIssue.id}`, { status: "todo" });
   log("🚀", "Seed issue created and assigned to CEO — pipeline is self-driving now");
 
-  // 3. Poll: wait for CEO to create sub-issues (timeout: 5 min)
+  // 4. Wait for CEO to create sub-issues
   let subIssues: PaperclipIssue[] = [];
-  const ceoPollDeadline = Date.now() + 5 * 60_000;
-  while (Date.now() < ceoPollDeadline) {
-    subIssues = await findSubIssues(seedIssue.id);
-    if (subIssues.length > 0) break;
-    log("⏳", "Waiting for CEO to create sub-issues...");
-    await new Promise((r) => setTimeout(r, 10_000));
+
+  if (wsConn) {
+    // ── WebSocket-driven: wait for activity.logged events indicating issue creation ──
+    subIssues = await waitForSubIssuesViaWebSocket(wsConn, seedIssue.id, 5 * 60_000);
+  } else {
+    // ── Fallback: polling mode ──
+    const ceoPollDeadline = Date.now() + 5 * 60_000;
+    while (Date.now() < ceoPollDeadline) {
+      subIssues = await findSubIssues(seedIssue.id);
+      if (subIssues.length > 0) break;
+      log("⏳", "Waiting for CEO to create sub-issues...");
+      await new Promise((r) => setTimeout(r, 10_000));
+    }
   }
+
   if (subIssues.length === 0) {
     log("💥", "CEO did not create sub-issues within 5 minutes");
+    wsConn?.close();
     await cleanup(seedIssue.id, []);
     return false;
   }
@@ -1010,10 +1092,12 @@ async function runAutonomous(): Promise<boolean> {
   for (const issue of subIssues) {
     const agentKey = issue.assigneeAgentId ? resolveAgentKey(issue.assigneeAgentId) : "?";
     const phase = (issue.metadata as Record<string, string>)?.bmadPhase ?? "?";
-    log("  📌", `[${phase}] ${issue.title} → ${agentKey}`);
+    const deps = (issue.metadata as Record<string, unknown>)?.dependsOn;
+    const depInfo = Array.isArray(deps) && deps.length > 0 ? ` (deps: ${deps.join(",")})` : "";
+    log("  📌", `[${phase}] ${issue.title} → ${agentKey} [${issue.status}]${depInfo}`);
   }
 
-  // 4. Poll: wait for all spec-phase sub-issues to reach "done" (or timeout)
+  // 5. Wait for all spec-phase sub-issues to reach "done"
   const specIssueIds = new Set(
     subIssues
       .filter((i) => {
@@ -1023,37 +1107,47 @@ async function runAutonomous(): Promise<boolean> {
       .map((i) => i.id),
   );
 
-  const pipelineDeadline = Date.now() + FLAGS.timeout;
-  let lastStatusLog = "";
-  while (Date.now() < pipelineDeadline) {
-    // Re-fetch all sub-issues
-    const current = await findSubIssues(seedIssue.id);
-    const specCurrent = current.filter((i) => specIssueIds.has(i.id));
-
-    const statusMap = specCurrent
-      .map((i) => {
-        const phase = (i.metadata as Record<string, string>)?.bmadPhase ?? "?";
-        return `${phase}:${i.status}`;
-      })
-      .join(" | ");
-
-    if (statusMap !== lastStatusLog) {
-      log("📊", `Pipeline status: ${statusMap}`);
-      lastStatusLog = statusMap;
-    }
-
-    const allDone = specCurrent.every(
-      (i) => i.status === "done" || i.status === "cancelled",
+  if (wsConn) {
+    // ── WebSocket-driven: stream events and track status changes in real time ──
+    await waitForPipelineCompletionViaWebSocket(
+      wsConn, seedIssue.id, specIssueIds, FLAGS.timeout,
     );
-    if (allDone) {
-      log("✅", "All spec-phase sub-issues completed!");
-      break;
-    }
+    wsConn.close();
+  } else {
+    // ── Fallback: polling mode ──
+    const pipelineDeadline = Date.now() + FLAGS.timeout;
+    let lastStatusLog = "";
+    while (Date.now() < pipelineDeadline) {
+      const current = await findSubIssues(seedIssue.id);
+      const specCurrent = current.filter((i) => specIssueIds.has(i.id));
 
-    await new Promise((r) => setTimeout(r, 15_000));
+      const statusMap = specCurrent
+        .map((i) => {
+          const phase = (i.metadata as Record<string, string>)?.bmadPhase ?? "?";
+          return `${phase}:${i.status}`;
+        })
+        .join(" | ");
+
+      if (statusMap !== lastStatusLog) {
+        log("📊", `Pipeline status: ${statusMap}`);
+        lastStatusLog = statusMap;
+      }
+
+      const allDone = specCurrent.every(
+        (i) => i.status === "done" || i.status === "cancelled",
+      );
+      if (allDone) {
+        log("✅", "All spec-phase sub-issues completed!");
+        break;
+      }
+
+      await new Promise((r) => setTimeout(r, 15_000));
+    }
   }
 
-  // 5. Collect traces from completed sub-issues (comments, status)
+  // 6. Collect traces from completed sub-issues (comments, status)
+  // Re-fetch sub-issues in case new ones were created during re-evaluation
+  subIssues = await findSubIssues(seedIssue.id);
   const traces: PhaseTrace[] = [];
   for (const issue of subIssues) {
     const phase =
@@ -1087,7 +1181,7 @@ async function runAutonomous(): Promise<boolean> {
     });
   }
 
-  // 6. Run invariants
+  // 7. Run invariants
   const parentIssue = await paperclip<PaperclipIssue>(
     "GET",
     `/api/issues/${seedIssue.id}`,
@@ -1127,7 +1221,7 @@ async function runAutonomous(): Promise<boolean> {
     ...softAssertions,
   ];
 
-  // 7. Cleanup + report
+  // 8. Cleanup + report
   await cleanup(seedIssue.id, subIssues);
   return printTestReport(
     traces,
@@ -1136,6 +1230,224 @@ async function runAutonomous(): Promise<boolean> {
     subIssues.length,
     phaseGroups,
   );
+}
+
+// ── WebSocket Event Helpers ──────────────────────────────────────────────────
+
+/**
+ * Wait for the CEO to create sub-issues by listening for activity.logged events
+ * on the WebSocket. Falls back to a one-shot API check every 30s as a safety net.
+ */
+async function waitForSubIssuesViaWebSocket(
+  wsConn: ReturnType<typeof connectPaperclipWebSocket>,
+  parentIssueId: string,
+  timeoutMs: number,
+): Promise<PaperclipIssue[]> {
+  return new Promise<PaperclipIssue[]>((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    let resolved = false;
+
+    // Listen for issue.created activity events or heartbeat completion
+    wsConn.onEvent(async (event) => {
+      if (resolved) return;
+
+      const isHeartbeatDone =
+        event.type === "heartbeat.run.status" &&
+        (event.payload.status === "succeeded" || event.payload.status === "failed");
+      const isIssueActivity =
+        event.type === "activity.logged" &&
+        event.payload.action === "issue.created";
+
+      if (isHeartbeatDone || isIssueActivity) {
+        log("🔔", `WS event: ${event.type} ${event.payload.action ?? event.payload.status ?? ""}`);
+
+        try {
+          const subIssues = await findSubIssues(parentIssueId);
+          if (subIssues.length > 0 && !resolved) {
+            resolved = true;
+            resolve(subIssues);
+          }
+        } catch {
+          // Non-fatal — will retry on next event
+        }
+      }
+    });
+
+    // Safety net: periodic check in case we missed an event
+    const safetyInterval = setInterval(async () => {
+      if (resolved || Date.now() > deadline) {
+        clearInterval(safetyInterval);
+        if (!resolved) {
+          resolved = true;
+          resolve([]); // Timeout
+        }
+        return;
+      }
+      try {
+        const subIssues = await findSubIssues(parentIssueId);
+        if (subIssues.length > 0 && !resolved) {
+          resolved = true;
+          clearInterval(safetyInterval);
+          resolve(subIssues);
+        }
+      } catch {
+        // Non-fatal
+      }
+    }, 30_000);
+
+    // Hard timeout
+    setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        clearInterval(safetyInterval);
+        resolve([]);
+      }
+    }, timeoutMs);
+  });
+}
+
+/**
+ * Wait for all spec-phase sub-issues to reach "done" by streaming WebSocket events.
+ *
+ * Reacts to:
+ * - heartbeat.run.status (succeeded/failed) → re-check issue statuses
+ * - activity.logged (issue.updated) → re-check issue statuses
+ *
+ * Also logs heartbeat run events and comments for real-time pipeline visibility.
+ */
+async function waitForPipelineCompletionViaWebSocket(
+  wsConn: ReturnType<typeof connectPaperclipWebSocket>,
+  parentIssueId: string,
+  specIssueIds: Set<string>,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    let resolved = false;
+    let lastStatusLog = "";
+
+    async function checkAndLogStatus(): Promise<boolean> {
+      const current = await findSubIssues(parentIssueId);
+      const specCurrent = current.filter((i) => specIssueIds.has(i.id));
+
+      const statusMap = specCurrent
+        .map((i) => {
+          const phase = (i.metadata as Record<string, string>)?.bmadPhase ?? "?";
+          return `${phase}:${i.status}`;
+        })
+        .join(" | ");
+
+      if (statusMap !== lastStatusLog) {
+        log("📊", `Pipeline status: ${statusMap}`);
+        lastStatusLog = statusMap;
+      }
+
+      return specCurrent.every(
+        (i) => i.status === "done" || i.status === "cancelled",
+      );
+    }
+
+    wsConn.onEvent(async (event) => {
+      if (resolved) return;
+
+      // ── Heartbeat run status changes ──
+      if (event.type === "heartbeat.run.status") {
+        const { status, agentId } = event.payload;
+        if (status === "running") {
+          const agentKey = typeof agentId === "string" ? resolveAgentKey(agentId) : "?";
+          log("🔔", `Agent ${agentKey} heartbeat started`);
+        } else if (status === "succeeded" || status === "failed") {
+          const agentKey = typeof agentId === "string" ? resolveAgentKey(agentId) : "?";
+          const icon = status === "succeeded" ? "✅" : "❌";
+          log("🔔", `${icon} Agent ${agentKey} heartbeat ${status}`);
+
+          try {
+            const allDone = await checkAndLogStatus();
+            if (allDone && !resolved) {
+              resolved = true;
+              log("✅", "All spec-phase sub-issues completed!");
+              resolve();
+            }
+          } catch (err) {
+            log("⚠️ ", `Status check failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        return;
+      }
+
+      // ── Activity events (issue updates, comments) ──
+      if (event.type === "activity.logged") {
+        const { action, entityType, agentId } = event.payload;
+
+        // Issue status updated
+        if (action === "issue.updated" && entityType === "issue") {
+          const details = event.payload.details as Record<string, unknown> | undefined;
+          const newStatus = details?.status;
+          if (newStatus) {
+            const agentKey = typeof agentId === "string" ? resolveAgentKey(agentId) : "system";
+            log("🔔", `Issue updated → ${newStatus} (by ${agentKey})`);
+
+            if (newStatus === "done" || newStatus === "cancelled") {
+              try {
+                const allDone = await checkAndLogStatus();
+                if (allDone && !resolved) {
+                  resolved = true;
+                  log("✅", "All spec-phase sub-issues completed!");
+                  resolve();
+                }
+              } catch (err) {
+                log("⚠️ ", `Status check failed: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            }
+          }
+        }
+
+        // New comment added (show progress)
+        if (action === "issue.comment_added") {
+          const details = event.payload.details as Record<string, unknown> | undefined;
+          const snippet = details?.bodySnippet;
+          const agentKey = typeof agentId === "string" ? resolveAgentKey(agentId) : "system";
+          if (typeof snippet === "string") {
+            log("  💬", `[${agentKey}] ${snippet.slice(0, 100)}`);
+          }
+        }
+      }
+    });
+
+    // Safety net: periodic full status check every 60s
+    const safetyInterval = setInterval(async () => {
+      if (resolved || Date.now() > deadline) {
+        clearInterval(safetyInterval);
+        if (!resolved) {
+          resolved = true;
+          log("⏰", "Pipeline timeout reached");
+          resolve();
+        }
+        return;
+      }
+      try {
+        const allDone = await checkAndLogStatus();
+        if (allDone && !resolved) {
+          resolved = true;
+          clearInterval(safetyInterval);
+          log("✅", "All spec-phase sub-issues completed! (safety check)");
+          resolve();
+        }
+      } catch {
+        // Non-fatal
+      }
+    }, 60_000);
+
+    // Hard timeout
+    setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        clearInterval(safetyInterval);
+        log("⏰", "Pipeline timeout reached");
+        resolve();
+      }
+    }, timeoutMs);
+  });
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

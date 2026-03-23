@@ -194,6 +194,11 @@ export PAPERCLIP_HOME="${PAPERCLIP_HOME:-/tmp/paperclip-native}"
 export PAPERCLIP_INSTANCE_ID=default
 export AI_TOOLS_BRIDGE_URL="http://localhost:8000"
 
+# Agent JWT secret — required for per-agent auth tokens.
+# Without this, agents run as "board" user and all comments appear
+# as authored by "You" instead of the agent.
+export PAPERCLIP_AGENT_JWT_SECRET="${PAPERCLIP_AGENT_JWT_SECRET:-bmad-dev-jwt-secret}"
+
 # Start AI tools bridge if available
 if ! curl -s --max-time 1 http://localhost:8000/health >/dev/null 2>&1; then
   BRIDGE_DIR="$PAPERCLIP_REPO/ai_tools_bridge"

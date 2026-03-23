@@ -87,6 +87,14 @@ interface PaperclipCompany {
   budgetMonthlyCents: number;
 }
 
+interface PaperclipProjectWorkspace {
+  id: string;
+  projectId: string;
+  name: string;
+  cwd: string | null;
+  isPrimary: boolean;
+}
+
 interface PaperclipProject {
   id: string;
   name: string;
@@ -95,6 +103,7 @@ interface PaperclipProject {
     effectiveLocalFolder?: string;
     managedFolder?: string;
   };
+  workspaces?: PaperclipProjectWorkspace[];
 }
 
 interface PaperclipGoal {
@@ -534,7 +543,12 @@ async function ensureGoal(): Promise<void> {
 }
 
 /**
- * Step 2c: Ensure a project exists with workspace pointing at this repo.
+ * Step 2c: Ensure a project exists with a workspace row pointing at the managed dir.
+ *
+ * The project_workspaces row is critical:
+ * - The file browser plugin queries it to know which directory to browse
+ * - The heartbeat service uses it to resolve the agent's working directory
+ * Without it, agents work in a fallback dir and the file browser shows nothing.
  */
 async function ensureProject(): Promise<void> {
   header("Step 2c: Ensure Project");
@@ -544,21 +558,46 @@ async function ensureProject(): Promise<void> {
     `/api/companies/${COMPANY_ID}/projects`,
   );
 
-  const existing = projects.find((p) => p.name === PROJECT_NAME);
-  if (existing) {
-    log("♻️ ", `Project already exists: ${existing.name} (${existing.id})`);
-    return;
+  let project = projects.find((p) => p.name === PROJECT_NAME);
+
+  if (!project) {
+    project = await paperclip<PaperclipProject>(
+      "POST",
+      `/api/companies/${COMPANY_ID}/projects`,
+      {
+        name: PROJECT_NAME,
+        description: PROJECT_DESCRIPTION,
+      },
+    );
+    log(`${GREEN}✅${NC}`, `Created project: ${project.name} → ${project.id}`);
+  } else {
+    log("♻️ ", `Project already exists: ${project.name} (${project.id})`);
   }
 
-  const project = await paperclip<PaperclipProject>(
-    "POST",
-    `/api/companies/${COMPANY_ID}/projects`,
-    {
-      name: PROJECT_NAME,
-      description: PROJECT_DESCRIPTION,
-    },
-  );
-  log(`${GREEN}✅${NC}`, `Created project: ${project.name} → ${project.id}`);
+  // Ensure a project_workspace row exists so the file browser plugin
+  // and heartbeat workspace resolution work correctly.
+  const workspaceDir = project.codebase?.effectiveLocalFolder
+    ?? project.codebase?.managedFolder;
+
+  const existingWorkspaces = project.workspaces ?? [];
+  if (existingWorkspaces.length === 0 && workspaceDir) {
+    const workspace = await paperclip<PaperclipProjectWorkspace>(
+      "POST",
+      `/api/projects/${project.id}/workspaces`,
+      {
+        name: PROJECT_NAME,
+        sourceType: "local_path",
+        cwd: workspaceDir,
+        isPrimary: true,
+      },
+    );
+    log(`${GREEN}✅${NC}`, `Created project workspace: ${workspace.id} → ${workspaceDir}`);
+  } else if (existingWorkspaces.length > 0) {
+    const primary = existingWorkspaces.find((w) => w.isPrimary) ?? existingWorkspaces[0];
+    log("♻️ ", `Project workspace exists: ${primary.id} → ${primary.cwd ?? workspaceDir ?? "(managed)"}`);
+  } else {
+    log("⚠️ ", "No workspace directory resolved — file browser may not work");
+  }
 }
 
 /**
@@ -601,16 +640,8 @@ async function createAgents(): Promise<Map<string, string>> {
   }
 
   for (const def of AGENT_DEFS) {
-    // Check if already exists
-    const existingAgent = existingByTitle.get(def.title);
-    if (existingAgent) {
-      agentIds.set(def.name, existingAgent.id);
-      log(`${DIM}♻️${NC}`, `Already exists: ${def.name} → ${existingAgent.id}`);
-      continue;
-    }
-
-    // Build process adapter config
-    const adapterConfig: Record<string, unknown> = {
+    // Build the desired adapter config (same for create and update)
+    const desiredAdapterConfig: Record<string, unknown> = {
       command: PROCESS_COMMAND,
       args: PROCESS_ARGS,
       cwd: PROJECT_ROOT,
@@ -620,6 +651,26 @@ async function createAgents(): Promise<Map<string, string>> {
         ...PROXY_ENV,
       },
     };
+
+    // Check if already exists
+    const existingAgent = existingByTitle.get(def.title);
+    if (existingAgent) {
+      agentIds.set(def.name, existingAgent.id);
+
+      // Always sync adapterConfig so env changes (proxy, OTel) propagate
+      // to existing agents without requiring a --clean reset.
+      try {
+        await paperclip<PaperclipAgent>(
+          "PATCH",
+          `/api/agents/${existingAgent.id}`,
+          { adapterConfig: desiredAdapterConfig },
+        );
+        log(`${DIM}♻️${NC}`, `Already exists: ${def.name} → ${existingAgent.id} (config synced)`);
+      } catch (syncErr) {
+        log(`${DIM}♻️${NC}`, `Already exists: ${def.name} → ${existingAgent.id} (config sync failed: ${syncErr})`);
+      }
+      continue;
+    }
 
     const runtimeConfig: Record<string, unknown> = {
       heartbeat: {
@@ -647,7 +698,7 @@ async function createAgents(): Promise<Map<string, string>> {
           icon: def.icon,
           capabilities: def.capabilities,
           adapterType: "process",
-          adapterConfig,
+          adapterConfig: desiredAdapterConfig,
           runtimeConfig,
           budgetMonthlyCents: def.budgetMonthlyCents,
           metadata,

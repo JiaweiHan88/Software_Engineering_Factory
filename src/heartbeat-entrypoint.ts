@@ -34,7 +34,7 @@
 import "dotenv/config";
 
 import { resolve } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { PaperclipClient } from "./adapter/paperclip-client.js";
 import type { PaperclipAgent, PaperclipIssue } from "./adapter/paperclip-client.js";
 import { PaperclipReporter } from "./adapter/reporter.js";
@@ -46,7 +46,7 @@ import { withRetry, isPaperclipRetryable } from "./adapter/retry.js";
 import { resolveRoleMapping, PAPERCLIP_SKILLS } from "./config/role-mapping.js";
 import type { RoleMappingEntry } from "./config/role-mapping.js";
 import { loadConfig } from "./config/config.js";
-import { allTools } from "./tools/index.js";
+import { allTools, setToolContext, clearToolContext } from "./tools/index.js";
 import { Logger } from "./observability/logger.js";
 import { CostTracker, inferProvider } from "./observability/cost-tracker.js";
 import { initTracing, shutdownTracing } from "./observability/tracing.js";
@@ -659,6 +659,32 @@ async function main(): Promise<void> {
     log.warn("No agent config files — falling back to BMAD persona prompt only");
   }
 
+  // ── Step 6.5: Load agent memory (PARA system) ────────────────────────
+  if (mapping.isOrchestrator && agentSystemMessage) {
+    const memoryDir = resolve(resolvedWorkspaceCwd ?? process.cwd(), '_bmad-output/memory');
+    const learningsDir = resolve(memoryDir, 'learnings');
+
+    if (existsSync(learningsDir)) {
+      const memoryFiles = readdirSync(learningsDir)
+        .filter((f: string) => f.endsWith('.md'))
+        .sort(); // chronological by filename
+
+      if (memoryFiles.length > 0) {
+        const memoryContent = memoryFiles
+          .map((f: string) => readFileSync(resolve(learningsDir, f), 'utf-8'))
+          .join('\n\n---\n\n');
+
+        if (memoryContent.length > 0) {
+          agentSystemMessage += '\n\n## Learnings from Previous Epics\n\n' + memoryContent;
+          log.info("Loaded PARA learnings into system message", {
+            fileCount: memoryFiles.length,
+            contentLength: memoryContent.length,
+          });
+        }
+      }
+    }
+  }
+
   // ── Step 7: Bootstrap Copilot SDK (SessionManager + Dispatcher) ─────
   const config = loadConfig();
 
@@ -678,6 +704,10 @@ async function main(): Promise<void> {
 
   const costTracker = new CostTracker();
   const dispatcher = new AgentDispatcher(sessionManager, config, costTracker);
+
+  // M2: Create ReviewOrchestrator for code-review phase routing
+  const { ReviewOrchestrator } = await import("./quality-gates/review-orchestrator.js");
+  const reviewOrchestrator = new ReviewOrchestrator(dispatcher, config);
 
   // ── Step 8: Process each assigned issue ─────────────────────────────
   // Phase A2: Checkout before work, release on error.
@@ -790,6 +820,17 @@ async function main(): Promise<void> {
     }
 
     try {
+      // ── M0: Set tool context before dispatching ─────────────────────
+      const issueMeta = lockedIssue.metadata as Record<string, unknown> | undefined;
+      setToolContext({
+        paperclipClient: paperclipClient,
+        agentId: env.agentId,
+        issueId: lockedIssue.id,
+        parentIssueId: lockedIssue.parentId ?? (issueMeta?.parentIssueId as string | undefined),
+        workspaceDir: resolvedWorkspaceCwd ?? process.cwd(),
+        companyId: env.companyId,
+      });
+
       if (mapping.isOrchestrator) {
         // ── CEO routing: initial delegation vs re-evaluation ──────────
         // If sub-issues already exist → re-evaluate (promote backlog tasks
@@ -838,10 +879,14 @@ async function main(): Promise<void> {
         }
       } else {
         // Domain agent: process the issue directly
-        await handlePaperclipIssue(lockedIssue, env.agentId, bmadRole, dispatcher, reporter);
+        await handlePaperclipIssue(lockedIssue, env.agentId, bmadRole, dispatcher, reporter, reviewOrchestrator);
       }
       // On success: don't release — checkout holds until status change
+      // ── M0: Clear tool context after processing ─────────────────────
+      clearToolContext();
     } catch (err) {
+      // ── M0: Clear tool context on error ─────────────────────────────
+      clearToolContext();
       log.error("Failed to process issue", { issueId: lockedIssue.id }, err instanceof Error ? err : undefined);
 
       // Phase A2: Release checkout lock on failure

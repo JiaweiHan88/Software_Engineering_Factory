@@ -1,18 +1,14 @@
 /**
  * Sprint Runner — Autonomous Story Lifecycle Engine
  *
- * Iterates through stories in sprint-status.yaml and drives each one
+ * @deprecated This module is deprecated as of M0. Story lifecycle is now
+ * driven by Paperclip issues and the heartbeat-handler/ceo-orchestrator.
+ * The ReviewOrchestrator wiring from this module has been extracted into
+ * the heartbeat path (M2). This file is kept for reference until M2 is
+ * complete, then will be deleted.
+ *
+ * Original: Iterates through stories in sprint-status.yaml and drives each one
  * through the BMAD lifecycle: create → dev → review → done.
- *
- * This is the "main loop" of the autonomous factory. It reads the sprint
- * status, finds stories that need work, dispatches them to the right agent,
- * and advances the lifecycle.
- *
- * Key behaviors:
- * - Processes stories in priority order (as listed in sprint-status.yaml)
- * - One story at a time (sequential, not parallel — for now)
- * - Respects review pass limit (max 3 by default) before escalation
- * - Emits events for observability
  *
  * @module adapter/sprint-runner
  */

@@ -36,6 +36,8 @@ import { resolveModel, loadModelStrategyConfig } from "../config/model-strategy.
 import { getAgent, allAgents } from "../agents/registry.js";
 import { allTools } from "../tools/index.js";
 import { Logger } from "../observability/logger.js";
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
 
 const log = Logger.child("ceo-orchestrator");
 
@@ -186,6 +188,21 @@ export function clearAgentIdCache(): void {
   agentIdCache = null;
 }
 
+/**
+ * Extract the story sequence number from issue metadata.
+ *
+ * Used for sequential story promotion (M1) — stories within an epic
+ * are promoted one at a time in sequence order.
+ *
+ * @param issue - Paperclip issue with metadata
+ * @returns Sequence number (defaults to 0 if not set)
+ */
+function getSequence(issue: PaperclipIssue): number {
+  const meta = issue.metadata as Record<string, unknown> | undefined;
+  const seq = meta?.storySequence;
+  return typeof seq === "number" ? seq : 0;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CEO Delegation Prompt
 // ─────────────────────────────────────────────────────────────────────────────
@@ -288,7 +305,22 @@ Respond with ONLY a JSON object (no markdown fences, no explanation outside the 
   "approvalReason": null
 }
 
-Set requiresApproval=true if: budget impact > $1000, irreversible infrastructure changes, or unclear scope needing human clarification.`;
+Set requiresApproval=true if: budget impact > $1000, irreversible infrastructure changes, or unclear scope needing human clarification.
+
+## Decision Authority
+You are authorized to make ALL decisions autonomously EXCEPT:
+- Changing product direction (requires board)
+- Budget above 80% spent (switch to critical-only; if no critical work, escalate)
+- Irreversible infrastructure decisions (requires board)
+- Scope increase > 50% (requires board)
+
+For everything else: DECIDE and PROCEED. Post your reasoning as a comment.
+Do NOT set requiresApproval to true unless one of the above conditions applies.
+
+## Learnings
+If the system message contains "Learnings from Previous Epics", review them and apply relevant lessons to this delegation plan.
+For example: if past retros show schema changes need Architect review, include an Architect review step for stories that touch the schema.
+Cite which learning informed each decision when applicable.`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -894,17 +926,25 @@ export async function reEvaluateDelegation(
     }
   }
 
-  // Deterministic promotion: promote backlog tasks whose deps are all "done"
+  // M1: Separate story issues from non-story issues
+  const storyIssues = activeChildren.filter(c =>
+    (c.metadata as Record<string, unknown> | undefined)?.bmadPhase === "execute",
+  );
+  const nonStoryIssues = activeChildren.filter(c =>
+    (c.metadata as Record<string, unknown> | undefined)?.bmadPhase !== "execute",
+  );
+
+  // Non-story issues: existing behavior (dependency-based promotion)
   let promoted = 0;
-  for (const child of backlogChildren) {
+  for (const child of nonStoryIssues) {
+    if (child.status !== "backlog") continue;
     const meta = child.metadata as Record<string, unknown> | undefined;
     const dependsOn = Array.isArray(meta?.dependsOn) ? (meta.dependsOn as number[]) : [];
 
     if (dependsOn.length === 0) {
-      // No deps but still in backlog — promote (shouldn't normally happen)
       await client.updateIssue(child.id, { status: "todo" });
       promoted++;
-      log.info("Promoted task (no deps)", { issueId: child.id, title: child.title });
+      log.info("Promoted non-story task (no deps)", { issueId: child.id, title: child.title });
       continue;
     }
 
@@ -916,10 +956,171 @@ export async function reEvaluateDelegation(
     if (allDepsDone) {
       await client.updateIssue(child.id, { status: "todo" });
       promoted++;
-      log.info("Promoted task (deps met)", {
+      log.info("Promoted non-story task (deps met)", {
         issueId: child.id,
         title: child.title,
         dependsOn,
+      });
+    }
+  }
+
+  // M1: Story issues — sequential promotion (one at a time)
+  if (storyIssues.length > 0) {
+    const sortedStories = [...storyIssues].sort((a, b) => {
+      const seqA = getSequence(a);
+      const seqB = getSequence(b);
+      return seqA - seqB;
+    });
+
+    const firstNonDone = sortedStories.find(s => s.status !== "done");
+    if (firstNonDone && firstNonDone.status === "backlog") {
+      // Check if dependencies are met
+      const meta = firstNonDone.metadata as Record<string, unknown> | undefined;
+      const dependsOn = Array.isArray(meta?.dependsOn) ? (meta.dependsOn as number[]) : [];
+      const depsOk = dependsOn.length === 0 || dependsOn.every((depIdx) => {
+        const depStatus = taskStatusByIndex.get(depIdx);
+        return depStatus === "done";
+      });
+
+      if (depsOk) {
+        // Promote to todo and assign to SM for detailed story creation
+        const smAgentId = await resolveAgentId("bmad-sm", client);
+        await client.updateIssue(firstNonDone.id, {
+          status: "todo",
+          ...(smAgentId ? { assigneeAgentId: smAgentId } : {}),
+          metadata: {
+            ...(firstNonDone.metadata as Record<string, unknown> | undefined),
+            workPhase: "create-story",
+          },
+        });
+        promoted++;
+        log.info("Sequential story promotion", {
+          issueId: firstNonDone.id,
+          title: firstNonDone.title,
+          sequence: getSequence(firstNonDone),
+        });
+      }
+    }
+  }
+
+  // M3: Check for epic completion — trigger retrospective
+  if (storyIssues.length > 0) {
+    const epicIds = [...new Set(
+      storyIssues
+        .map(s => (s.metadata as Record<string, unknown> | undefined)?.epicId)
+        .filter((id): id is string => typeof id === "string"),
+    )];
+
+    for (const epicId of epicIds) {
+      const epicStories = storyIssues.filter(s =>
+        (s.metadata as Record<string, unknown> | undefined)?.epicId === epicId,
+      );
+      const allEpicDone = epicStories.every(s => s.status === "done");
+      const retroExists = nonStoryIssues.some(c =>
+        (c.metadata as Record<string, unknown> | undefined)?.isRetrospective === true &&
+        (c.metadata as Record<string, unknown> | undefined)?.epicId === epicId,
+      );
+
+      if (allEpicDone && !retroExists) {
+        // Create retro sub-issue assigned to SM
+        const smId = await resolveAgentId("bmad-sm", client);
+        try {
+          await client.createIssue({
+            title: `Epic ${epicId} Retrospective`,
+            description:
+              `All stories for epic ${epicId} are complete. ` +
+              `Run the bmad-retrospective skill. ` +
+              `Analyze: what worked, what didn't, review patterns, E2E coverage. ` +
+              `Save the retrospective report as \`_bmad-output/epic-${epicId}-retrospective.md\`.`,
+            status: "todo",
+            assigneeAgentId: smId,
+            parentId: parentIssue.id,
+            metadata: {
+              bmadPhase: "review",
+              workPhase: "retrospective",
+              isRetrospective: true,
+              epicId,
+            },
+          });
+          log.info("Epic retro issue created", { epicId, parentId: parentIssue.id });
+        } catch (err) {
+          log.warn("Failed to create retro issue", {
+            epicId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+  }
+
+  // M3-4: Extract learnings from completed retrospectives
+  const completedRetros = activeChildren.filter(c =>
+    c.status === "done" &&
+    (c.metadata as Record<string, unknown> | undefined)?.isRetrospective === true &&
+    !(c.metadata as Record<string, unknown> | undefined)?.learningsExtracted,
+  );
+
+  for (const retro of completedRetros) {
+    const retroMeta = retro.metadata as Record<string, unknown> | undefined;
+    const epicId = retroMeta?.epicId;
+    if (typeof epicId !== "string") continue;
+
+    const workspaceCwd = config.targetProjectRoot ?? process.cwd();
+    const retroFilePath = resolve(workspaceCwd, `_bmad-output/epic-${epicId}-retrospective.md`);
+
+    if (!existsSync(retroFilePath)) {
+      log.warn("Retro file not found, skipping learnings extraction", { epicId, retroFilePath });
+      continue;
+    }
+
+    try {
+      // Create a CEO session to extract durable learnings
+      const ceoAgent = getAgent("ceo") ?? getAgent("bmad-ceo") ?? {
+        name: "ceo",
+        displayName: "CEO - Chief Executive",
+        description: "Strategic orchestrator",
+        prompt: "You are the CEO. You orchestrate, not execute.",
+      };
+
+      const extractionStrategy = loadModelStrategyConfig();
+      const extractionModel = resolveModel("ceo-reeval", {}, extractionStrategy);
+      const extractionSessionId = await sessionManager.createAgentSession({
+        agent: ceoAgent,
+        allAgents,
+        tools: [],
+        model: extractionModel.model,
+        systemMessage: config.agentSystemMessage,
+      });
+
+      const retroContent = readFileSync(retroFilePath, "utf-8");
+      const extraction = await sessionManager.sendAndWait(
+        extractionSessionId,
+        `Read this retrospective report and extract 3-5 durable, actionable learnings ` +
+        `that should inform future epic delegation. Format as a markdown list with brief ` +
+        `explanations. Focus on process improvements, not task-specific details.\n\n` +
+        retroContent,
+        60_000,
+      );
+
+      // Save to PARA memory
+      const learningsPath = resolve(workspaceCwd, `_bmad-output/memory/learnings/epic-${epicId}.md`);
+      mkdirSync(dirname(learningsPath), { recursive: true });
+      writeFileSync(learningsPath, `# Learnings from Epic ${epicId}\n\n${extraction}\n`);
+
+      // Mark as extracted so we don't re-process
+      await client.updateIssue(retro.id, {
+        metadata: { ...retroMeta, learningsExtracted: true },
+      });
+
+      log.info("Learnings extracted from retro", { epicId, learningsPath });
+      await client.addIssueComment(
+        parentIssue.id,
+        `📝 **CEO — Learnings extracted** from epic ${epicId} retrospective and saved to memory.`,
+      );
+    } catch (err) {
+      log.warn("Failed to extract learnings from retro", {
+        epicId,
+        error: err instanceof Error ? err.message : String(err),
       });
     }
   }

@@ -19,6 +19,15 @@ import { getAgent } from "../agents/registry.js";
 import type { AgentDispatcher, WorkPhase } from "./agent-dispatcher.js";
 import type { PaperclipIssue } from "./paperclip-client.js";
 import type { PaperclipReporter } from "./reporter.js";
+import type { ReviewOrchestrator } from "../quality-gates/review-orchestrator.js";
+import { reassignIssue } from "./issue-reassignment.js";
+import { tryGetToolContext } from "../tools/tool-context.js";
+import {
+  createStoryBranch,
+  commitChanges,
+  pushBranch,
+  createPR,
+} from "./git-integration.js";
 import { Logger } from "../observability/logger.js";
 
 const log = Logger.child("heartbeat-handler");
@@ -88,6 +97,22 @@ export async function handleHeartbeat(
     issueId: ctx.issue.id,
   });
 
+  // M4: Create story branch before dev-story dispatch
+  const storyIdForGit = ctx.issue.storyId ?? ctx.issue.id;
+  if (phase === "dev-story") {
+    const toolCtxPreDispatch = tryGetToolContext();
+    const gitCwd = toolCtxPreDispatch?.workspaceDir;
+    try {
+      const branchName = await createStoryBranch(storyIdForGit, { cwd: gitCwd });
+      log.info("Story branch ready", { branchName, storyId: storyIdForGit });
+    } catch (err) {
+      log.warn("Git branch creation failed (non-fatal, continuing dispatch)", {
+        storyId: storyIdForGit,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // 4. Dispatch to the agent
   const result = await dispatcher.dispatch(
     {
@@ -108,6 +133,63 @@ export async function handleHeartbeat(
     };
   }
 
+  // 5. M1: Auto-reassign after successful dispatch based on completed phase
+  // M4: Commit and push after dev-story dispatch
+  if (phase === "dev-story") {
+    const toolCtxGit = tryGetToolContext();
+    const gitCwd = toolCtxGit?.workspaceDir;
+    try {
+      const commitResult = await commitChanges(
+        storyIdForGit,
+        `Implementation for ${ctx.issue.title ?? storyIdForGit}`,
+        { cwd: gitCwd },
+      );
+      if (commitResult.success && commitResult.stdout !== "Nothing to commit") {
+        const branchName = `story/${storyIdForGit}`;
+        await pushBranch(branchName, { cwd: gitCwd });
+        log.info("Dev-story changes committed and pushed", { storyId: storyIdForGit });
+      }
+    } catch (err) {
+      log.warn("Git commit/push failed after dev-story (non-fatal)", {
+        storyId: storyIdForGit,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const toolCtx = tryGetToolContext();
+  if (toolCtx) {
+    try {
+      if (phase === "create-story") {
+        // SM finished creating detailed story → reassign to Dev
+        await reassignIssue(
+          toolCtx.paperclipClient,
+          ctx.issue.id,
+          "bmad-dev",
+          `📋 Story detail created. Ready for implementation.`,
+          { workPhase: "dev-story" },
+        );
+      } else if (phase === "dev-story") {
+        // Dev finished implementing → reassign to QA
+        await reassignIssue(
+          toolCtx.paperclipClient,
+          ctx.issue.id,
+          "bmad-qa",
+          `💻 Implementation complete. Ready for code review.`,
+          { workPhase: "code-review" },
+        );
+      }
+      // code-review reassignment handled by ReviewOrchestrator (M2)
+      // or by the code_review_result tool handler
+    } catch (reassignErr) {
+      log.warn("Auto-reassignment failed (non-fatal)", {
+        phase,
+        issueId: ctx.issue.id,
+        error: reassignErr instanceof Error ? reassignErr.message : String(reassignErr),
+      });
+    }
+  }
+
   return {
     status: "completed",
     message: `${agent.displayName}: Completed ${phase} for "${ctx.issue.title}"`,
@@ -121,11 +203,15 @@ export async function handleHeartbeat(
  * Converts the PaperclipIssue into a HeartbeatContext, dispatches the work,
  * and reports the result back to Paperclip via issue comments.
  *
+ * M2: If the phase is 'code-review' and a ReviewOrchestrator is provided,
+ * the full adversarial review loop is used instead of single-pass dispatch.
+ *
  * @param issue - PaperclipIssue from getAgentInbox() or webhook
  * @param agentId - The agent processing this issue
  * @param bmadRole - The BMAD role for this agent
  * @param dispatcher - The agent dispatcher to route work through
  * @param reporter - Reporter to send results back to Paperclip via issue comments
+ * @param reviewOrchestrator - Optional ReviewOrchestrator for full adversarial review loop
  * @returns HeartbeatResult
  */
 export async function handlePaperclipIssue(
@@ -134,6 +220,7 @@ export async function handlePaperclipIssue(
   bmadRole: string,
   dispatcher: AgentDispatcher,
   reporter: PaperclipReporter,
+  reviewOrchestrator?: ReviewOrchestrator,
 ): Promise<HeartbeatResult> {
   // Convert PaperclipIssue → HeartbeatContext
   const ctx: HeartbeatContext = {
@@ -150,13 +237,170 @@ export async function handlePaperclipIssue(
     },
   };
 
-  // Process the issue
+  // M2: Check if this is a code-review phase with ReviewOrchestrator available
+  const resolvedPhase = (issue.phase as WorkPhase | undefined)
+    ?? resolvePhaseFromMetadata(issue.metadata)
+    ?? inferPhaseFromRole(bmadRole);
+
+  if (resolvedPhase === "code-review" && reviewOrchestrator) {
+    // Full adversarial review loop via ReviewOrchestrator
+    const reviewResult = await handleCodeReview(
+      issue, agentId, reviewOrchestrator, reporter,
+    );
+    return reviewResult;
+  }
+
+  // Process the issue via standard dispatch
   const result = await handleHeartbeat(ctx, dispatcher);
 
   // Report result back to Paperclip via issue comment
   await reporter.reportHeartbeatResult(agentId, issue.id, result);
 
   return result;
+}
+
+/**
+ * M2: Handle a code-review phase via the full ReviewOrchestrator loop.
+ *
+ * Runs multi-pass adversarial review with fix cycles and quality gate evaluation.
+ * On approval, updates issue status to 'done' (Paperclip auto-wakes CEO).
+ * On escalation, posts findings to parent issue for CEO review.
+ *
+ * @param issue - The Paperclip issue being reviewed
+ * @param agentId - The QA agent processing this review
+ * @param orchestrator - The ReviewOrchestrator instance
+ * @param reporter - Reporter for issue comments
+ * @returns HeartbeatResult
+ */
+async function handleCodeReview(
+  issue: PaperclipIssue,
+  agentId: string,
+  orchestrator: ReviewOrchestrator,
+  reporter: PaperclipReporter,
+): Promise<HeartbeatResult> {
+  const meta = issue.metadata as Record<string, unknown> | undefined;
+  const storyId = (meta?.storyId as string) ?? issue.storyId ?? issue.id;
+  const toolCtx = tryGetToolContext();
+
+  log.info("Running ReviewOrchestrator for code-review", {
+    issueId: issue.id,
+    storyId,
+  });
+
+  const result = await orchestrator.run({
+    storyId,
+    storyTitle: issue.title,
+    onDelta: (d) => process.stdout.write(d),
+  });
+
+  if (result.approved) {
+    // M2-3: Evaluate E2E test need after review passes (optional dispatch)
+    // The E2E decision is non-blocking — story is marked done regardless
+    log.info("Review approved, marking issue done", { storyId, passes: result.totalPasses });
+
+    await reporter.reportHeartbeatResult(agentId, issue.id, {
+      status: "completed",
+      message: `Code review PASSED on pass ${result.totalPasses}. ${result.summary}`,
+      storyId,
+    });
+
+    // Update issue metadata with final review result
+    if (toolCtx) {
+      try {
+        await toolCtx.paperclipClient.updateIssue(issue.id, {
+          metadata: {
+            ...meta,
+            reviewPasses: result.totalPasses,
+            lastReviewResult: "pass",
+            lastReviewFindings: result.summary.slice(0, 500),
+          },
+        });
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    // M4: Create PR after review approval
+    const gitCwd = toolCtx?.workspaceDir;
+    try {
+      const branchName = `story/${storyId}`;
+      // Commit any review-pass fixes
+      await commitChanges(storyId, `Review pass ${result.totalPasses} - approved`, { cwd: gitCwd });
+      await pushBranch(branchName, { cwd: gitCwd });
+      const prUrl = await createPR(
+        storyId,
+        issue.title ?? storyId,
+        `Story: ${issue.title}\n\nReview passed on pass ${result.totalPasses}.\n${result.summary}`,
+        { cwd: gitCwd },
+      );
+      log.info("PR created after review approval", { storyId, prUrl });
+    } catch (err) {
+      log.warn("PR creation failed after review approval (non-fatal)", {
+        storyId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    return { status: "completed", message: `Review passed (${result.totalPasses} passes)`, storyId };
+  }
+
+  if (result.escalated) {
+    // Escalate to CEO via parent issue comment
+    log.warn("Review escalated", { storyId, passes: result.totalPasses, reason: result.summary });
+
+    if (toolCtx) {
+      const parentId = (meta?.parentIssueId as string) ?? issue.parentId;
+      if (parentId) {
+        try {
+          await toolCtx.paperclipClient.addIssueComment(
+            parentId,
+            `⚠️ **ESCALATION**: Story "${issue.title}" failed ${result.totalPasses} review passes.\n` +
+            `Findings: ${result.summary}\n` +
+            `CEO action needed: force-approve, reassign, or investigate.`,
+          );
+        } catch {
+          // Non-fatal
+        }
+      }
+
+      // Update issue metadata
+      try {
+        await toolCtx.paperclipClient.updateIssue(issue.id, {
+          metadata: {
+            ...meta,
+            reviewPasses: result.totalPasses,
+            lastReviewResult: "escalated",
+            lastReviewFindings: result.summary.slice(0, 500),
+          },
+        });
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    return { status: "needs-human", message: `Review escalated to CEO (${result.totalPasses} passes)`, storyId };
+  }
+
+  // Review failed but not escalated — reassign to Dev for fixes
+  if (toolCtx) {
+    try {
+      await reassignIssue(
+        toolCtx.paperclipClient,
+        issue.id,
+        "bmad-dev",
+        `❌ Code review FAILED (pass ${result.totalPasses}).\n` +
+        `Findings:\n${result.summary}\n` +
+        `Fix the HIGH/CRITICAL issues and reassign back to bmad-qa.`,
+        { workPhase: "dev-story", reviewFixMode: true },
+      );
+    } catch (err) {
+      log.warn("Failed to reassign after review failure", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return { status: "working", message: `Review failed, reassigned to Dev (pass ${result.totalPasses})`, storyId };
 }
 
 /**

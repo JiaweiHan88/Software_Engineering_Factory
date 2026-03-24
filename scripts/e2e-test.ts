@@ -966,6 +966,419 @@ function listWorkspaceFiles(dir: string): string[] {
   return files;
 }
 
+// ── M0-M3 Invariant Validators (Paperclip-Backed State) ─────────────────────
+
+/**
+ * M0: Validate that stories are tracked as Paperclip issues (not YAML).
+ *
+ * Checks that execute-phase sub-issues have the correct Paperclip metadata:
+ * - bmadPhase === 'execute'
+ * - storyFilePath in metadata (points to workspace story file)
+ * - storySequence in metadata (ordering)
+ * - workPhase in metadata (tracks SM→Dev→QA lifecycle)
+ */
+function validatePaperclipBackedState(
+  subIssues: PaperclipIssue[],
+  workspaceDir: string | undefined,
+): InvariantResult[] {
+  const results: InvariantResult[] = [];
+
+  const storyIssues = subIssues.filter(
+    (i) => (i.metadata as Record<string, unknown>)?.bmadPhase === "execute",
+  );
+
+  // M0-1: Story issues exist as Paperclip issues
+  results.push({
+    id: "M0-1",
+    label: "Stories tracked as Paperclip issues (not YAML)",
+    passed: storyIssues.length > 0,
+    detail: `${storyIssues.length} story issue(s) with bmadPhase=execute`,
+  });
+
+  // M0-2: Story issues have storyFilePath metadata
+  const withFilePath = storyIssues.filter(
+    (i) => typeof (i.metadata as Record<string, unknown>)?.storyFilePath === "string",
+  );
+  results.push({
+    id: "M0-2",
+    label: "Story issues have storyFilePath metadata",
+    passed: storyIssues.length > 0 && withFilePath.length === storyIssues.length,
+    detail: `${withFilePath.length}/${storyIssues.length} have storyFilePath`,
+  });
+
+  // M0-3: Story issues have storySequence metadata
+  const withSequence = storyIssues.filter(
+    (i) => typeof (i.metadata as Record<string, unknown>)?.storySequence === "number",
+  );
+  results.push({
+    id: "M0-3",
+    label: "Story issues have storySequence metadata",
+    passed: storyIssues.length > 0 && withSequence.length === storyIssues.length,
+    detail: `${withSequence.length}/${storyIssues.length} have storySequence`,
+  });
+
+  // M0-4: Story issues have workPhase metadata
+  const withWorkPhase = storyIssues.filter(
+    (i) => typeof (i.metadata as Record<string, unknown>)?.workPhase === "string",
+  );
+  results.push({
+    id: "M0-4",
+    label: "Story issues have workPhase metadata",
+    passed: storyIssues.length > 0 && withWorkPhase.length === storyIssues.length,
+    detail: `${withWorkPhase.length}/${storyIssues.length} have workPhase`,
+  });
+
+  // M0-5: Story files exist on disk (if workspace is available)
+  if (workspaceDir && existsSync(workspaceDir) && withFilePath.length > 0) {
+    const existingFiles = withFilePath.filter((i) => {
+      const filePath = (i.metadata as Record<string, string>).storyFilePath;
+      return existsSync(join(workspaceDir, filePath));
+    });
+    results.push({
+      id: "M0-5",
+      label: "Story files exist in workspace",
+      passed: existingFiles.length === withFilePath.length,
+      detail: `${existingFiles.length}/${withFilePath.length} story files found on disk`,
+      soft: true,
+    });
+  }
+
+  // M0-6: No sprint-status.yaml in workspace (eliminated)
+  if (workspaceDir && existsSync(workspaceDir)) {
+    const yamlExists = existsSync(join(workspaceDir, "_bmad-output", "sprint-status.yaml"))
+      || existsSync(join(workspaceDir, "sprint-status.yaml"));
+    results.push({
+      id: "M0-6",
+      label: "No sprint-status.yaml in workspace",
+      passed: !yamlExists,
+      detail: yamlExists ? "sprint-status.yaml still exists" : "Eliminated",
+      soft: true,
+    });
+  }
+
+  return results;
+}
+
+/**
+ * M1: Validate sequential story promotion.
+ *
+ * Checks that story issues are promoted one at a time in sequence order:
+ * - At most one story in-progress or todo at a time
+ * - Stories have monotonically increasing storySequence
+ * - Reassignment metadata shows SM→Dev→QA handoff (workPhase transitions)
+ */
+function validateSequentialPromotion(
+  subIssues: PaperclipIssue[],
+): InvariantResult[] {
+  const results: InvariantResult[] = [];
+
+  const storyIssues = subIssues.filter(
+    (i) => (i.metadata as Record<string, unknown>)?.bmadPhase === "execute",
+  );
+
+  if (storyIssues.length === 0) {
+    results.push({
+      id: "M1-1",
+      label: "Sequential promotion (no story issues)",
+      passed: true,
+      detail: "No execute-phase stories to check",
+    });
+    return results;
+  }
+
+  // M1-1: At most one story in active state (todo or in_progress) at a time
+  const activeStories = storyIssues.filter(
+    (i) => i.status === "todo" || i.status === "in_progress",
+  );
+  results.push({
+    id: "M1-1",
+    label: "At most one story active at a time",
+    passed: activeStories.length <= 1,
+    detail: `${activeStories.length} active story/stories (expected ≤1)`,
+  });
+
+  // M1-2: Stories have sequential ordering via storySequence
+  const withSeq = storyIssues
+    .filter((i) => typeof (i.metadata as Record<string, unknown>)?.storySequence === "number")
+    .sort((a, b) =>
+      ((a.metadata as Record<string, number>).storySequence) -
+      ((b.metadata as Record<string, number>).storySequence),
+    );
+
+  if (withSeq.length >= 2) {
+    const isMonotonic = withSeq.every((item, idx) => {
+      if (idx === 0) return true;
+      const prev = (withSeq[idx - 1].metadata as Record<string, number>).storySequence;
+      const curr = (item.metadata as Record<string, number>).storySequence;
+      return curr > prev;
+    });
+    results.push({
+      id: "M1-2",
+      label: "Story sequences are monotonically increasing",
+      passed: isMonotonic,
+      detail: withSeq.map((i) => (i.metadata as Record<string, number>).storySequence).join(", "),
+    });
+  } else {
+    results.push({
+      id: "M1-2",
+      label: "Story sequences are monotonically increasing",
+      passed: true,
+      detail: `Only ${withSeq.length} sequenced story/stories — trivially valid`,
+    });
+  }
+
+  // M1-3: Completed stories finished before active story started (ordering respected)
+  // If any story is done, verify its sequence < active story's sequence
+  if (activeStories.length > 0 && withSeq.length > 0) {
+    const activeSeqs = activeStories
+      .map((i) => (i.metadata as Record<string, number>)?.storySequence)
+      .filter((s) => typeof s === "number");
+    const doneSeqs = storyIssues
+      .filter((i) => i.status === "done")
+      .map((i) => (i.metadata as Record<string, number>)?.storySequence)
+      .filter((s) => typeof s === "number");
+
+    if (activeSeqs.length > 0 && doneSeqs.length > 0) {
+      const minActive = Math.min(...activeSeqs);
+      const allDoneBefore = doneSeqs.every((s) => s < minActive);
+      results.push({
+        id: "M1-3",
+        label: "Done stories have lower sequence than active story",
+        passed: allDoneBefore,
+        detail: `Done sequences: [${doneSeqs.join(",")}], Active: [${activeSeqs.join(",")}]`,
+      });
+    }
+  }
+
+  // M1-4: workPhase values are valid lifecycle phases
+  const validWorkPhases = new Set(["create-story", "dev-story", "code-review", "retrospective"]);
+  const storyWorkPhases = storyIssues
+    .map((i) => (i.metadata as Record<string, string>)?.workPhase)
+    .filter(Boolean);
+  const allValid = storyWorkPhases.every((p) => validWorkPhases.has(p));
+  results.push({
+    id: "M1-4",
+    label: "Story workPhase values are valid lifecycle phases",
+    passed: storyWorkPhases.length === 0 || allValid,
+    detail: allValid
+      ? `All valid: ${[...new Set(storyWorkPhases)].join(", ")}`
+      : `Invalid phases found: ${storyWorkPhases.filter((p) => !validWorkPhases.has(p)).join(", ")}`,
+    soft: true,
+  });
+
+  return results;
+}
+
+/**
+ * M2: Validate multi-pass review visibility in issue metadata and comments.
+ *
+ * Checks that code review passes are tracked via Paperclip issue metadata
+ * (reviewPasses, lastReviewResult) and that review findings appear in comments.
+ */
+async function validateMultiPassReview(
+  subIssues: PaperclipIssue[],
+): Promise<InvariantResult[]> {
+  const results: InvariantResult[] = [];
+
+  const storyIssues = subIssues.filter(
+    (i) => (i.metadata as Record<string, unknown>)?.bmadPhase === "execute",
+  );
+
+  // Find stories that have gone through review (reviewPasses > 0 or workPhase was code-review)
+  const reviewedStories = storyIssues.filter((i) => {
+    const meta = i.metadata as Record<string, unknown>;
+    return (
+      typeof meta?.reviewPasses === "number" ||
+      meta?.lastReviewResult !== undefined ||
+      meta?.workPhase === "code-review" ||
+      i.status === "done"
+    );
+  });
+
+  if (reviewedStories.length === 0) {
+    results.push({
+      id: "M2-1",
+      label: "Review metadata present on reviewed stories",
+      passed: true,
+      detail: "No reviewed stories yet — skipped",
+    });
+    return results;
+  }
+
+  // M2-1: Review passes tracked in issue metadata
+  const withReviewPasses = reviewedStories.filter(
+    (i) => typeof (i.metadata as Record<string, unknown>)?.reviewPasses === "number",
+  );
+  results.push({
+    id: "M2-1",
+    label: "Review passes tracked in issue metadata",
+    passed: withReviewPasses.length > 0,
+    detail: `${withReviewPasses.length}/${reviewedStories.length} stories have reviewPasses metadata`,
+    soft: true,
+  });
+
+  // M2-2: Last review result recorded in metadata
+  const withResult = reviewedStories.filter(
+    (i) => typeof (i.metadata as Record<string, unknown>)?.lastReviewResult === "string",
+  );
+  results.push({
+    id: "M2-2",
+    label: "Last review result recorded in metadata",
+    passed: withResult.length > 0,
+    detail: `${withResult.length}/${reviewedStories.length} stories have lastReviewResult`,
+    soft: true,
+  });
+
+  // M2-3: Review-related comments exist on story issues
+  let storiesWithReviewComments = 0;
+  for (const story of reviewedStories) {
+    try {
+      const comments = await paperclip<PaperclipComment[]>(
+        "GET",
+        `/api/issues/${story.id}/comments`,
+      );
+      const reviewComments = comments.filter((c) =>
+        /review|finding|approved|rejected|pass|severity|CRITICAL|HIGH|MED|LOW/i.test(c.body),
+      );
+      if (reviewComments.length > 0) storiesWithReviewComments++;
+    } catch { /* ignore API errors */ }
+  }
+  results.push({
+    id: "M2-3",
+    label: "Review comments present on story issues",
+    passed: storiesWithReviewComments > 0,
+    detail: `${storiesWithReviewComments}/${reviewedStories.length} stories have review-related comments`,
+    soft: true,
+  });
+
+  // M2-4: No story exceeded review pass limit (3)
+  const overLimit = withReviewPasses.filter(
+    (i) => ((i.metadata as Record<string, number>)?.reviewPasses ?? 0) > 3,
+  );
+  results.push({
+    id: "M2-4",
+    label: "No story exceeded review pass limit",
+    passed: overLimit.length === 0,
+    detail: overLimit.length === 0
+      ? "All within limit"
+      : `${overLimit.length} story/stories over 3-pass limit`,
+    soft: true,
+  });
+
+  return results;
+}
+
+/**
+ * M3: Validate organizational learning — retrospective and memory.
+ *
+ * Checks:
+ * - Retro issue created after all stories in an epic complete
+ * - Learnings files appear in workspace _bmad-output/memory/learnings/
+ */
+function validateOrganizationalLearning(
+  subIssues: PaperclipIssue[],
+  workspaceDir: string | undefined,
+): InvariantResult[] {
+  const results: InvariantResult[] = [];
+
+  const storyIssues = subIssues.filter(
+    (i) => (i.metadata as Record<string, unknown>)?.bmadPhase === "execute",
+  );
+
+  // Group by epicId
+  const epicMap = new Map<string, PaperclipIssue[]>();
+  for (const story of storyIssues) {
+    const epicId = (story.metadata as Record<string, string>)?.epicId;
+    if (epicId) {
+      if (!epicMap.has(epicId)) epicMap.set(epicId, []);
+      epicMap.get(epicId)!.push(story);
+    }
+  }
+
+  // Find completed epics (all stories done)
+  const completedEpics = [...epicMap.entries()].filter(([, stories]) =>
+    stories.length > 0 && stories.every((s) => s.status === "done"),
+  );
+
+  if (completedEpics.length === 0) {
+    // No completed epics — M3 checks are not applicable yet
+    results.push({
+      id: "M3-1",
+      label: "Retro issue after epic completion",
+      passed: true,
+      detail: "No completed epics yet — retro check skipped",
+      soft: true,
+    });
+    results.push({
+      id: "M3-2",
+      label: "Learnings files in workspace",
+      passed: true,
+      detail: "No completed epics yet — memory check skipped",
+      soft: true,
+    });
+    return results;
+  }
+
+  // M3-1: Retro issues exist for completed epics
+  const retroIssues = subIssues.filter(
+    (i) => (i.metadata as Record<string, unknown>)?.isRetrospective === true,
+  );
+  const completedEpicIds = new Set(completedEpics.map(([id]) => id));
+  const retrosForCompletedEpics = retroIssues.filter(
+    (i) => completedEpicIds.has((i.metadata as Record<string, string>)?.epicId),
+  );
+
+  results.push({
+    id: "M3-1",
+    label: "Retro issue created for completed epics",
+    passed: retrosForCompletedEpics.length > 0,
+    detail: `${retrosForCompletedEpics.length} retro issue(s) for ${completedEpics.length} completed epic(s)`,
+    soft: true,
+  });
+
+  // M3-2: Learnings files exist in workspace memory directory
+  if (workspaceDir && existsSync(workspaceDir)) {
+    const learningsDir = join(workspaceDir, "_bmad-output", "memory", "learnings");
+    let learningFiles: string[] = [];
+    if (existsSync(learningsDir)) {
+      try {
+        learningFiles = readdirSync(learningsDir).filter((f) => f.endsWith(".md"));
+      } catch { /* ignore */ }
+    }
+    results.push({
+      id: "M3-2",
+      label: "Learnings files in workspace memory",
+      passed: learningFiles.length > 0,
+      detail: learningFiles.length > 0
+        ? `${learningFiles.length} learning file(s): ${learningFiles.slice(0, 3).join(", ")}`
+        : "No learnings files found in _bmad-output/memory/learnings/",
+      soft: true,
+    });
+
+    // M3-3: Retro issues have learningsExtracted metadata
+    const withExtracted = retrosForCompletedEpics.filter(
+      (i) => (i.metadata as Record<string, unknown>)?.learningsExtracted === true,
+    );
+    results.push({
+      id: "M3-3",
+      label: "Retro learnings extracted to memory",
+      passed: withExtracted.length === retrosForCompletedEpics.length && retrosForCompletedEpics.length > 0,
+      detail: `${withExtracted.length}/${retrosForCompletedEpics.length} retros have learningsExtracted=true`,
+      soft: true,
+    });
+  } else {
+    results.push({
+      id: "M3-2",
+      label: "Learnings files in workspace memory",
+      passed: false,
+      detail: "Workspace dir unknown or missing — cannot check memory files",
+      soft: true,
+    });
+  }
+
+  return results;
+}
+
 function runSoftAssertions(
   traces: PhaseTrace[],
   subIssues: PaperclipIssue[],
@@ -1285,6 +1698,12 @@ async function runFull(): Promise<boolean> {
   const fullModeReviewInvariants = traces.some((t) => t.phase === "review") ? validateReviewPhaseInvariants(traces) : [];
   const fullModeTestResult = hasExecutePhase ? verifyTestsPass(targetWorkspaceDir) : null;
 
+  // M0-M3 invariants — Paperclip-backed state, sequential promotion, review, learning
+  const m0Invariants = validatePaperclipBackedState(subIssues, targetWorkspaceDir);
+  const m1Invariants = validateSequentialPromotion(subIssues);
+  const m2Invariants = await validateMultiPassReview(subIssues);
+  const m3Invariants = validateOrganizationalLearning(subIssues, targetWorkspaceDir);
+
   const totalTimeSec = Math.round((Date.now() - startTime) / 1000);
   const softAssertions = runSoftAssertions(traces, subIssues, totalTimeSec);
 
@@ -1295,6 +1714,10 @@ async function runFull(): Promise<boolean> {
     ...fullModeExecuteInvariants,
     ...fullModeReviewInvariants,
     ...(fullModeTestResult ? [fullModeTestResult] : []),
+    ...m0Invariants,
+    ...m1Invariants,
+    ...m2Invariants,
+    ...m3Invariants,
     ...softAssertions,
   ];
 
@@ -1589,6 +2012,12 @@ async function runAutonomous(): Promise<boolean> {
     testResult = verifyTestsPass(targetWorkspaceDir);
   }
 
+  // M0-M3 invariants — Paperclip-backed state, sequential promotion, review, learning
+  const m0Invariants = validatePaperclipBackedState(subIssues, targetWorkspaceDir);
+  const m1Invariants = validateSequentialPromotion(subIssues);
+  const m2Invariants = await validateMultiPassReview(subIssues);
+  const m3Invariants = validateOrganizationalLearning(subIssues, targetWorkspaceDir);
+
   const totalTimeSec = Math.round((Date.now() - startTime) / 1000);
   const softAssertions = runSoftAssertions(traces, subIssues, totalTimeSec);
   const allInvariants = [
@@ -1598,6 +2027,10 @@ async function runAutonomous(): Promise<boolean> {
     ...executeInvariants,
     ...reviewInvariants,
     ...(testResult ? [testResult] : []),
+    ...m0Invariants,
+    ...m1Invariants,
+    ...m2Invariants,
+    ...m3Invariants,
     ...softAssertions,
   ];
 

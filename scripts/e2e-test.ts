@@ -697,11 +697,18 @@ function validateDelegationInvariants(
   results.push({ id: "D11", label: "Plan phase present", passed: (phaseGroups.get("plan")?.length ?? 0) > 0, detail: `${phaseGroups.get("plan")?.length ?? 0} task(s)` });
 
   // D12: Execute/Review is NOT a separate CEO task — it's handled by SM story creation
-  // and dev↔QA reassignment. Verify no review phase tasks were created by CEO.
+  // and dev↔QA reassignment. Only flag execute/review issues directly delegated by CEO
+  // (SM-created stories legitimately have bmadPhase=execute but lack delegatedBy=ceo).
   if (!FLAGS.specOnly) {
-    const reviewCount = phaseGroups.get("review")?.length ?? 0;
-    const executeCount = phaseGroups.get("execute")?.length ?? 0;
-    results.push({ id: "D12", label: "No separate execute/review CEO tasks", passed: reviewCount === 0 && executeCount === 0, detail: `execute: ${executeCount}, review: ${reviewCount} (expected 0)` });
+    const ceoExecute = subIssues.filter((i) => {
+      const meta = i.metadata as Record<string, unknown> | undefined;
+      return meta?.bmadPhase === "execute" && meta?.delegatedBy === "ceo";
+    });
+    const ceoReview = subIssues.filter((i) => {
+      const meta = i.metadata as Record<string, unknown> | undefined;
+      return meta?.bmadPhase === "review" && meta?.delegatedBy === "ceo";
+    });
+    results.push({ id: "D12", label: "No separate execute/review CEO tasks", passed: ceoExecute.length === 0 && ceoReview.length === 0, detail: `ceo-execute: ${ceoExecute.length}, ceo-review: ${ceoReview.length} (expected 0)` });
   }
 
   return results;

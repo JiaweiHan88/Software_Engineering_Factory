@@ -346,11 +346,11 @@ describe("orchestrateCeoIssue", () => {
 
   it("creates sub-issues from CEO delegation plan", async () => {
     const plan = {
-      analysis: "This needs research then implementation",
-      phases: ["research", "execute"],
+      analysis: "This needs research then planning",
+      phases: ["research", "plan"],
       tasks: [
         { title: "Research API patterns", description: "Look into REST best practices", assignTo: "bmad-analyst", priority: "medium", phase: "research" },
-        { title: "Implement the API", description: "Build the CRUD endpoints", assignTo: "bmad-dev", priority: "high", phase: "execute" },
+        { title: "Plan stories for API", description: "Break down into implementable stories", assignTo: "bmad-pm", priority: "high", phase: "plan" },
       ],
       requiresApproval: false,
     };
@@ -391,8 +391,8 @@ describe("orchestrateCeoIssue", () => {
     expect(parentIdUpdates).toHaveLength(2);
 
     const secondCall = client.createIssue.mock.calls[1][0];
-    expect(secondCall.title).toBe("Implement the API");
-    expect(secondCall.assigneeAgentId).toBe("uuid-dev");
+    expect(secondCall.title).toBe("Plan stories for API");
+    expect(secondCall.assigneeAgentId).toBe("uuid-pm");
     expect(secondCall.priority).toBe("high");
   });
 
@@ -496,10 +496,10 @@ describe("orchestrateCeoIssue", () => {
   it("continues creating remaining sub-issues when one fails", async () => {
     const plan = {
       analysis: "Two tasks",
-      phases: ["execute"],
+      phases: ["research", "define"],
       tasks: [
-        { title: "Task 1", description: "First", assignTo: "bmad-dev", priority: "high", phase: "execute" },
-        { title: "Task 2", description: "Second", assignTo: "bmad-pm", priority: "medium", phase: "execute" },
+        { title: "Task 1", description: "First", assignTo: "bmad-analyst", priority: "high", phase: "research" },
+        { title: "Task 2", description: "Second", assignTo: "bmad-pm", priority: "medium", phase: "define" },
       ],
       requiresApproval: false,
     };
@@ -535,8 +535,8 @@ describe("orchestrateCeoIssue", () => {
   it("creates unassigned sub-issue when agent ID resolution fails", async () => {
     const plan = {
       analysis: "Unknown agent role",
-      phases: ["execute"],
-      tasks: [{ title: "Task", description: "Do work", assignTo: "bmad-nonexistent", priority: "medium", phase: "execute" }],
+      phases: ["research"],
+      tasks: [{ title: "Task", description: "Do work", assignTo: "bmad-nonexistent", priority: "medium", phase: "research" }],
       requiresApproval: false,
     };
 
@@ -564,8 +564,8 @@ describe("orchestrateCeoIssue", () => {
   it("posts delegation summary on parent issue", async () => {
     const plan = {
       analysis: "Simple task",
-      phases: ["execute"],
-      tasks: [{ title: "Implement feature", description: "Build it", assignTo: "bmad-dev", priority: "high", phase: "execute" }],
+      phases: ["define"],
+      tasks: [{ title: "Create PRD for feature", description: "Write the product requirements", assignTo: "bmad-pm", priority: "high", phase: "define" }],
       requiresApproval: false,
     };
 
@@ -586,8 +586,8 @@ describe("orchestrateCeoIssue", () => {
     const calls = client.addIssueComment.mock.calls;
     const lastComment = calls[calls.length - 1][1] as string;
     expect(lastComment).toContain("Delegation Complete");
-    expect(lastComment).toContain("Implement feature");
-    expect(lastComment).toContain("bmad-dev");
+    expect(lastComment).toContain("Create PRD for feature");
+    expect(lastComment).toContain("bmad-pm");
   });
 
   it("recovers phantom 500 by matching metadata.parentIssueId (not parentId)", async () => {
@@ -596,14 +596,14 @@ describe("orchestrateCeoIssue", () => {
     // to avoid execution-lock 500). The fix must use metadata.parentIssueId.
     const plan = {
       analysis: "Single task plan",
-      phases: ["execute"],
+      phases: ["define"],
       tasks: [
         {
           title: "Build feature X",
-          description: "Implement feature X",
-          assignTo: "bmad-dev",
+          description: "Define feature X",
+          assignTo: "bmad-pm",
           priority: "high",
-          phase: "execute",
+          phase: "define",
         },
       ],
       requiresApproval: false,
@@ -612,12 +612,12 @@ describe("orchestrateCeoIssue", () => {
     const phantomIssue: PaperclipIssue = {
       id: "sub-phantom-1",
       title: "Build feature X",
-      description: "Implement feature X",
+      description: "Define feature X",
       status: "todo",
-      assigneeAgentId: "uuid-dev",
+      assigneeAgentId: "uuid-pm",
       // No parentId — intentionally omitted at creation time
       metadata: {
-        bmadPhase: "execute",
+        bmadPhase: "define",
         parentIssueId: "issue-1", // ← set at creation time
         delegatedBy: "ceo",
       },
@@ -649,7 +649,7 @@ describe("orchestrateCeoIssue", () => {
     expect(result.subtasksCreated).toBe(1);
 
     // listIssues was called with assigneeAgentId (not parentId)
-    expect(client.listIssues).toHaveBeenCalledWith({ assigneeAgentId: "uuid-dev" });
+    expect(client.listIssues).toHaveBeenCalledWith({ assigneeAgentId: "uuid-pm" });
 
     // Parent link was applied retroactively
     const parentLinkCall = client.updateIssue.mock.calls.find(
@@ -668,9 +668,9 @@ describe("orchestrateCeoIssue", () => {
   it("records cost when CostTracker is provided", async () => {
     const plan = {
       analysis: "Simple task",
-      phases: ["execute"],
+      phases: ["define"],
       tasks: [
-        { title: "Do the thing", description: "Just do it", assignTo: "bmad-dev", priority: "medium", phase: "execute" },
+        { title: "Create PRD", description: "Define requirements", assignTo: "bmad-pm", priority: "medium", phase: "define" },
       ],
       requiresApproval: false,
     };
@@ -705,9 +705,9 @@ describe("orchestrateCeoIssue", () => {
   it("does not fail when CostTracker is omitted (backward compatible)", async () => {
     const plan = {
       analysis: "Simple task",
-      phases: ["execute"],
+      phases: ["define"],
       tasks: [
-        { title: "Do it", description: "Go", assignTo: "bmad-dev", priority: "medium", phase: "execute" },
+        { title: "Define it", description: "Go", assignTo: "bmad-pm", priority: "medium", phase: "define" },
       ],
       requiresApproval: false,
     };

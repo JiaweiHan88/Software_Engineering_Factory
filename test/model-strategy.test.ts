@@ -224,4 +224,20 @@ describe("loadModelStrategyConfig", () => {
     expect(config.tiers.standard.copilot).toBeTruthy();
     expect(config.tiers.powerful.copilot).toBeTruthy();
   });
+
+  it("should flatten all tiers to Sonnet 4.6 when BMAD_TEST_MODE=true", () => {
+    process.env.BMAD_TEST_MODE = "true";
+    try {
+      const config = loadModelStrategyConfig();
+      const expectedModel = "claude-sonnet-4.6";
+
+      expect(config.tiers.fast.copilot).toBe(expectedModel);
+      expect(config.tiers.standard.copilot).toBe(expectedModel);
+      expect(config.tiers.powerful.copilot).toBe(expectedModel);
+      expect(config.preferByok).toBe(false);
+      expect(config.availableByok.size).toBe(0);
+    } finally {
+      delete process.env.BMAD_TEST_MODE;
+    }
+  });
 });

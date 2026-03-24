@@ -277,8 +277,25 @@ export function resolveModel(
  * - `MODEL_TIER_FAST` — Override fast tier Copilot model
  * - `MODEL_TIER_STANDARD` — Override standard tier Copilot model
  * - `MODEL_TIER_POWERFUL` — Override powerful tier Copilot model
+ * - `BMAD_TEST_MODE` — When "true", forces all tiers to use claude-sonnet-4.6 via Copilot
  */
 export function loadModelStrategyConfig(): ModelStrategyConfig {
+  // Test mode: flatten all tiers to Sonnet 4.6 for deterministic, cost-effective E2E runs
+  if (process.env.BMAD_TEST_MODE === "true") {
+    const testModel = "claude-sonnet-4.6";
+    return {
+      defaultTier: "standard",  
+      preferByok: false,
+      byokPreference: [],
+      tiers: {
+        fast: { copilot: testModel },
+        standard: { copilot: testModel },
+        powerful: { copilot: testModel },
+      },
+      availableByok: new Set(),
+    };
+  }
+
   const availableByok = new Set<ModelProvider>();
   if (process.env.ANTHROPIC_API_KEY) availableByok.add("anthropic");
   if (process.env.OPENAI_API_KEY) availableByok.add("openai");

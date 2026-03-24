@@ -219,12 +219,16 @@ const FULL_PIPELINE_ISSUE = {
     "1. **Research** — Brief survey of CSV parsing edge cases (RFC 4180, quoting rules)",
     "2. **Define** — Concise PRD with the API surface and error handling strategy",
     "3. **Plan** — Simple story breakdown (1-2 stories: core parser + file I/O)",
-    "4. **Execute** — Implement the module in TypeScript:",
+    "4. **Execute & Review** — Implement the module, then code review happens automatically:",
     "   - `src/csv-parser.ts` — Core parser logic",
     "   - `src/csv-parser.test.ts` — Test suite with ≥5 test cases",
     "   - `package.json` — With `scripts.test: \"vitest run\"`",
     "   - `tsconfig.json` — TypeScript config",
-    "5. **Review** — Code review with quality checks, findings must be addressed",
+    "   - After implementation, the developer hands off to code reviewer on the same ticket",
+    "   - Code reviewer either passes (done) or bounces back to developer for fixes",
+    "",
+    "Note: Execute and Review are NOT separate CEO tasks — the Plan phase creates",
+    "story issues, and code review happens via ticket reassignment (dev → QA → dev/done).",
     "",
     "After implementation, **run the tests** (`npm test`) and ensure they pass.",
     "After code review, fix any HIGH/CRITICAL findings and re-run tests.",
@@ -692,10 +696,12 @@ function validateDelegationInvariants(
   // D11: Plan phase present
   results.push({ id: "D11", label: "Plan phase present", passed: (phaseGroups.get("plan")?.length ?? 0) > 0, detail: `${phaseGroups.get("plan")?.length ?? 0} task(s)` });
 
-  // D12: Review phase present (full pipeline only)
+  // D12: Execute/Review is NOT a separate CEO task — it's handled by SM story creation
+  // and dev↔QA reassignment. Verify no review phase tasks were created by CEO.
   if (!FLAGS.specOnly) {
     const reviewCount = phaseGroups.get("review")?.length ?? 0;
-    results.push({ id: "D12", label: "Review phase present", passed: reviewCount > 0, detail: `${reviewCount} task(s)` });
+    const executeCount = phaseGroups.get("execute")?.length ?? 0;
+    results.push({ id: "D12", label: "No separate execute/review CEO tasks", passed: reviewCount === 0 && executeCount === 0, detail: `execute: ${executeCount}, review: ${reviewCount} (expected 0)` });
   }
 
   return results;
@@ -846,38 +852,69 @@ function validateExecutePhaseInvariants(
 
 /**
  * Validate review-phase invariants: QA agent reviewed the code.
+ *
+ * With the dev↔QA ticket model, review happens on the SAME issue as
+ * implementation (bmadPhase="execute", workPhase transitions to "code-review").
+ * We detect review activity by checking:
+ * - Issue was reassigned to QA (workPhase = "code-review")
+ * - Or has review-related comments
+ * - Or has explicit review traces (legacy separate review tasks)
  */
 function validateReviewPhaseInvariants(
   traces: PhaseTrace[],
+  subIssues?: PaperclipIssue[],
 ): InvariantResult[] {
   const results: InvariantResult[] = [];
+
+  // Check for legacy separate review tasks
   const reviewTraces = traces.filter((t) => t.phase === "review");
 
-  if (reviewTraces.length === 0) {
-    results.push({ id: "R1", label: "Review phase ran", passed: false, detail: "No review-phase traces" });
+  // Also check execute-phase issues that transitioned to code-review
+  const codeReviewedIssues = (subIssues ?? []).filter((issue) => {
+    const meta = issue.metadata as Record<string, unknown> | undefined;
+    return meta?.workPhase === "code-review" || meta?.workPhase === "done";
+  });
+
+  // Check for review-related comments in execute traces
+  const execTraces = traces.filter((t) => t.phase === "execute");
+  const hasReviewComments = execTraces.some((t) =>
+    t.commentPreviews.some((p) =>
+      /review|approved|rejected|finding|quality/i.test(p),
+    ),
+  );
+
+  const hasReviewEvidence = reviewTraces.length > 0 || codeReviewedIssues.length > 0 || hasReviewComments;
+
+  // R1: Code review ran (either as separate task or on same ticket)
+  results.push({
+    id: "R1",
+    label: "Code review activity detected",
+    passed: hasReviewEvidence,
+    detail: hasReviewEvidence
+      ? `${reviewTraces.length} review traces, ${codeReviewedIssues.length} code-reviewed issues, review comments: ${hasReviewComments}`
+      : "No review evidence found",
+  });
+
+  if (!hasReviewEvidence) {
     return results;
   }
 
-  // R1: Review phase heartbeat(s) succeeded
-  const allSucceeded = reviewTraces.every((t) => t.heartbeatStatus === "succeeded");
-  results.push({
-    id: "R1",
-    label: "Review phase heartbeat(s) succeeded",
-    passed: allSucceeded,
-    detail: reviewTraces.map((t) => `${t.agentKey}:${t.heartbeatStatus}`).join(", "),
-  });
-
   // R2: Reviewer posted comments (review findings)
-  const totalComments = reviewTraces.reduce((s, t) => s + t.commentCount, 0);
+  const allReviewComments = [
+    ...reviewTraces.reduce((s, t) => s + t.commentCount, 0) > 0 ? [reviewTraces.reduce((s, t) => s + t.commentCount, 0)] : [],
+  ];
+  const totalComments = reviewTraces.reduce((s, t) => s + t.commentCount, 0)
+    + (hasReviewComments ? execTraces.reduce((s, t) => s + t.commentCount, 0) : 0);
   results.push({
     id: "R2",
     label: "Reviewer posted review comments",
     passed: totalComments > 0,
-    detail: `${totalComments} comment(s)`,
+    detail: `${totalComments} comment(s) with review content`,
   });
 
   // R3: Review comments are substantive
-  const totalChars = reviewTraces.reduce((s, t) => s + t.totalCommentChars, 0);
+  const totalChars = reviewTraces.reduce((s, t) => s + t.totalCommentChars, 0)
+    + (hasReviewComments ? execTraces.reduce((s, t) => s + t.totalCommentChars, 0) : 0);
   results.push({
     id: "R3",
     label: "Review comments are substantive",
@@ -1695,7 +1732,7 @@ async function runFull(): Promise<boolean> {
   // Execute+review phase invariants (if phases were run)
   const hasExecutePhase = traces.some((t) => t.phase === "execute");
   const fullModeExecuteInvariants = hasExecutePhase ? validateExecutePhaseInvariants(traces, targetWorkspaceDir) : [];
-  const fullModeReviewInvariants = traces.some((t) => t.phase === "review") ? validateReviewPhaseInvariants(traces) : [];
+  const fullModeReviewInvariants = hasExecutePhase ? validateReviewPhaseInvariants(traces, subIssues) : [];
   const fullModeTestResult = hasExecutePhase ? verifyTestsPass(targetWorkspaceDir) : null;
 
   // M0-M3 invariants — Paperclip-backed state, sequential promotion, review, learning
@@ -2006,7 +2043,7 @@ async function runAutonomous(): Promise<boolean> {
 
   if (!FLAGS.specOnly) {
     executeInvariants = validateExecutePhaseInvariants(traces, targetWorkspaceDir);
-    reviewInvariants = validateReviewPhaseInvariants(traces);
+    reviewInvariants = validateReviewPhaseInvariants(traces, subIssues);
 
     // Try running tests in the workspace (soft check)
     testResult = verifyTestsPass(targetWorkspaceDir);

@@ -257,9 +257,15 @@ Analyze this issue and create a delegation plan with dependency-aware scheduling
 ### Agent Capabilities
 - **Research** — Analyst (bmad-analyst) and/or PM (bmad-pm) investigate feasibility
 - **Define** — PM creates PRD (bmad-pm), Architect creates architecture (bmad-architect), UX creates design (bmad-ux-designer)
-- **Plan** — Scrum Master creates sprint plan and stories (bmad-sm)
-- **Execute** — Developer implements (bmad-dev), QA reviews (bmad-qa), Tech Writer documents (bmad-tech-writer)
+- **Plan** — Scrum Master creates sprint plan and stories (bmad-sm). The SM will create detailed story issues for implementation — you do NOT need to create execute/implement tasks.
 - **Quick** — Quick Flow (bmad-quick-flow) handles simple spec+implement+review in one pass
+
+### IMPORTANT: What YOU Create vs What Happens Automatically
+- **YOU create** tasks for: Research, Define, Plan. These are separate delegated tasks.
+- **YOU do NOT create** tasks for: Execute (implement), Review (code review).
+  - The **Plan** task (SM) creates story issues automatically. Those stories are then promoted for implementation.
+  - **Code review** happens on the SAME ticket as implementation — the developer finishes, the ticket is reassigned to QA, QA reviews, and either passes it or sends it back. This is automatic. Do NOT create a separate "Code review" task.
+- If the issue mentions "Execute" or "Review" in its scope, that is handled automatically AFTER the Plan phase completes. You only need to ensure a Plan task exists.
 
 ### Dependency Rules
 - Use the \`dependsOn\` field to declare which tasks must complete before another can start.
@@ -279,8 +285,9 @@ Analyze this issue and create a delegation plan with dependency-aware scheduling
 ### Critical Rules
 - Each sub-task description MUST be self-contained with enough context for the agent.
 - In each task description, explicitly state what prerequisite outputs the agent should read from the workspace (if any).
-- **ALWAYS include ALL phases that the issue description requests.** If the issue says "Research → Define → Plan → Execute → Review", you MUST create tasks for ALL five phases — no skipping.
-- You may ONLY skip phases if the issue description does NOT mention them and the work is genuinely trivial (e.g., a one-line config change).
+- **Create tasks for Research, Define, and Plan phases ONLY.** Execute and Review are handled automatically after Plan.
+- If the issue mentions "Execute" or "Review", include a Plan task — the SM will create stories for implementation, and code review happens automatically on the same ticket.
+- **NEVER create tasks with phase "execute" or "review".** The only valid phases in your output are: "research", "define", "plan".
 - When in doubt, include more phases rather than fewer. Research and Define phases are almost always needed.
 - For simple/quick tasks where a single agent can handle everything end-to-end, use Quick Flow (bmad-quick-flow).
 - Set priority based on the parent issue priority and task criticality.
@@ -316,6 +323,14 @@ Respond with ONLY a JSON object (no markdown fences, no explanation outside the 
       "priority": "medium",
       "phase": "define",
       "dependsOn": [0, 1]
+    },
+    {
+      "title": "Create story breakdown and sprint plan",
+      "description": "Read the PRD and architecture docs. Break down into implementable stories. The stories you create will be automatically promoted for implementation and code review.",
+      "assignTo": "bmad-sm",
+      "priority": "medium",
+      "phase": "plan",
+      "dependsOn": [1, 2]
     }
   ],
   "requiresApproval": false,
@@ -550,6 +565,36 @@ export async function orchestrateCeoIssue(
       `⚠️ **CEO** — Could not parse delegation plan. Raw analysis:\n\n${response.slice(0, 2000)}`,
     );
     return { success: false, subtasksCreated: 0, error: "Failed to parse delegation plan" };
+  }
+
+  // ── 4b. Strip execute/review tasks — safety net ───────────────────
+  // The CEO prompt says "don't create execute/review tasks", but LLMs may
+  // ignore instructions. Filter them out programmatically.
+  // Execute → handled by SM story creation. Review → happens on same ticket.
+  const BLOCKED_PHASES = new Set(["execute", "review"]);
+  const originalCount = plan.tasks.length;
+  plan.tasks = plan.tasks.filter(t => !BLOCKED_PHASES.has(t.phase));
+  if (plan.tasks.length < originalCount) {
+    const stripped = originalCount - plan.tasks.length;
+    log.warn("CEO plan: stripped execute/review tasks (handled automatically)", {
+      stripped,
+      remaining: plan.tasks.length,
+    });
+    // Re-index dependsOn references after filtering
+    // Build an index map: old index → new index (or -1 if stripped)
+    const oldTasks = parseDelegationPlan(response)?.tasks ?? [];
+    const indexMap = new Map<number, number>();
+    let newIdx = 0;
+    for (let i = 0; i < oldTasks.length; i++) {
+      if (!BLOCKED_PHASES.has(oldTasks[i].phase)) {
+        indexMap.set(i, newIdx++);
+      }
+    }
+    for (const task of plan.tasks) {
+      task.dependsOn = task.dependsOn
+        .map(dep => indexMap.get(dep))
+        .filter((dep): dep is number => dep !== undefined);
+    }
   }
 
   log.info("CEO delegation plan parsed", {

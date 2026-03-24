@@ -199,17 +199,42 @@ export const issueStatusTool = defineTool("issue_status", {
           // OK if not checked out — may have already been released
         }
 
-        // Build metadata update if provided
+        // Build metadata update — auto-set workPhase based on target role.
+        // When dev→QA, set workPhase to "code-review".
+        // When QA→dev (rejection), set workPhase back to "dev-story".
+        // This ensures the heartbeat handler dispatches to the correct phase config.
+        const ROLE_TO_WORK_PHASE: Record<string, string> = {
+          "bmad-qa": "code-review",
+          "bmad-dev": "dev-story",
+        };
+        const autoWorkPhase = ROLE_TO_WORK_PHASE[args.target_role.toLowerCase()];
+
         let metadataUpdate: Record<string, unknown> | undefined;
-        if (args.metadata_updates) {
-          try {
-            const currentIssue = await client.getIssue(issueId);
-            const existingMeta = currentIssue.metadata as Record<string, unknown> | undefined;
-            const newMeta = JSON.parse(args.metadata_updates) as Record<string, unknown>;
-            metadataUpdate = { ...existingMeta, ...newMeta };
-          } catch {
-            // Non-fatal — proceed without metadata update
+        try {
+          const currentIssue = await client.getIssue(issueId);
+          const existingMeta = currentIssue.metadata as Record<string, unknown> | undefined;
+
+          // Start with existing metadata
+          const mergedMeta: Record<string, unknown> = { ...(existingMeta ?? {}) };
+
+          // Apply auto workPhase if applicable
+          if (autoWorkPhase) {
+            mergedMeta.workPhase = autoWorkPhase;
           }
+
+          // Apply explicit metadata_updates on top (if provided)
+          if (args.metadata_updates) {
+            try {
+              const newMeta = JSON.parse(args.metadata_updates) as Record<string, unknown>;
+              Object.assign(mergedMeta, newMeta);
+            } catch {
+              // Non-fatal — proceed with auto-update only
+            }
+          }
+
+          metadataUpdate = mergedMeta;
+        } catch {
+          // Non-fatal — proceed without metadata update
         }
 
         // Update assignee (Paperclip auto-wakes the new agent)

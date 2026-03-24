@@ -80,7 +80,12 @@ export interface BmadConfig {
   model: string;
   /** Working directory for BMAD output (stories, reviews, etc.) */
   outputDir: string;
-  /** Path to sprint-status.yaml */
+  /**
+   * Path to sprint-status.yaml.
+   * @deprecated M0: Sprint-status.yaml is replaced by Paperclip issues.
+   * Kept for backward compatibility with sprint-runner.ts (deprecated).
+   * Will be removed after M2.
+   */
   sprintStatusPath: string;
   /** Max code review passes before escalation */
   reviewPassLimit: number;

@@ -7,38 +7,38 @@ You are operating within the **BMAD Method** — an agentic agile development fr
 1. **Quality over Speed** — Never ship code that fails review.
 2. **Single-Pass Development** — `dev-story` runs exactly ONCE per story. Get it right.
 3. **Adversarial Review** — Code review is deliberately tough. CRITICAL/HIGH findings block merging.
-4. **Sprint-Driven** — Work is organized in sprints tracked by `sprint-status.yaml`.
+4. **Paperclip-Driven** — Work is organized as Paperclip issues. Story lifecycle is tracked via issue status and metadata.
 
 ## Story Lifecycle
 
 ```
-backlog → ready-for-dev → in-progress → review → done
-                                           ↑ (up to 3 passes)
+backlog → todo → in_progress → review → done
+                                  ↑ (up to 3 passes)
 ```
 
-1. **Product Manager** creates stories from requirements → `backlog`
-2. **Product Owner** prioritizes and moves stories → `ready-for-dev`
-3. **Developer** implements the story → `in-progress` → `review`
-4. **Code Reviewer** performs adversarial review:
-   - **Pass**: Story → `done`
-   - **Fail (HIGH/CRITICAL)**: Reviewer fixes in-place, re-reviews (max 3 passes)
-   - **After 3 fails**: Escalate to human
+1. **CEO** delegates work → creates sub-issues in Paperclip
+2. **Scrum Master** creates detailed story files → status: `backlog`
+3. **CEO** promotes next story sequentially → status: `todo` (auto-wakes Dev)
+4. **Developer** implements the story → status: `in_progress` (via checkout)
+5. **Developer** reassigns to QA → Paperclip auto-wakes Code Reviewer
+6. **Code Reviewer** performs adversarial review:
+   - **Pass**: Story → `done` (Paperclip auto-wakes CEO for re-evaluation)
+   - **Fail (HIGH/CRITICAL)**: Reassigns to Dev for fixes, re-reviews (max 3 passes)
+   - **After 3 fails**: Escalates to CEO via parent issue comment
 
-## Sprint Status File
+## Issue Tracking
 
-All agents read and update `sprint-status.yaml`:
+All agents use Paperclip issues for lifecycle tracking:
+- **issue_status** tool with action='read' — view all sibling issue statuses
+- **issue_status** tool with action='update' — change status
+- **issue_status** tool with action='reassign' — hand off to another agent
 
-```yaml
-sprint:
-  number: 1
-  goal: "MVP agent orchestration"
-  stories:
-    - id: STORY-001
-      title: "Implement heartbeat handler"
-      status: in-progress
-      assigned: bmad-developer
-      review-passes: 0
-```
+Issue metadata tracks BMAD-specific state:
+- `bmadPhase` — pipeline phase (research/define/plan/execute/review)
+- `workPhase` — specific work phase (dev-story, code-review, etc.)
+- `storyId` — story identifier
+- `storyFilePath` — path to story markdown in workspace
+- `reviewPasses` — number of review passes completed
 
 ## Quality Gates
 

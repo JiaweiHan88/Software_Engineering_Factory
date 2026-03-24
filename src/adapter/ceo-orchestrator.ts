@@ -36,6 +36,8 @@ import { resolveModel, loadModelStrategyConfig } from "../config/model-strategy.
 import { getAgent, allAgents } from "../agents/registry.js";
 import { allTools } from "../tools/index.js";
 import { Logger } from "../observability/logger.js";
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
 
 const log = Logger.child("ceo-orchestrator");
 
@@ -186,6 +188,37 @@ export function clearAgentIdCache(): void {
   agentIdCache = null;
 }
 
+/**
+ * Extract the story sequence number from issue metadata.
+ *
+ * Used for sequential story promotion (M1) — stories within an epic
+ * are promoted one at a time in sequence order.
+ *
+ * Falls back to `taskIndex` when `storySequence` is not set (e.g., CEO-
+ * delegated skeleton tasks that haven't been refined by the SM yet).
+ *
+ * @param issue - Paperclip issue with metadata
+ * @returns Sequence number (defaults to 0 if not set)
+ */
+function getSequence(issue: PaperclipIssue): number {
+  const meta = issue.metadata as Record<string, unknown> | undefined;
+  const seq = meta?.storySequence;
+  if (typeof seq === "number") return seq;
+  // Fallback to taskIndex so CEO-delegated execute tasks sort in dependency order
+  const idx = meta?.taskIndex;
+  return typeof idx === "number" ? idx : 0;
+}
+
+/**
+ * Check if an issue is an SM-created story (has storySequence metadata).
+ * CEO-delegated skeleton tasks have bmadPhase="execute" but no storySequence;
+ * those should use dependency-based promotion, not sequential promotion.
+ */
+function isRefinedStory(issue: PaperclipIssue): boolean {
+  const meta = issue.metadata as Record<string, unknown> | undefined;
+  return typeof meta?.storySequence === "number";
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CEO Delegation Prompt
 // ─────────────────────────────────────────────────────────────────────────────
@@ -246,9 +279,10 @@ Analyze this issue and create a delegation plan with dependency-aware scheduling
 ### Critical Rules
 - Each sub-task description MUST be self-contained with enough context for the agent.
 - In each task description, explicitly state what prerequisite outputs the agent should read from the workspace (if any).
-- Do NOT skip necessary phases. If the issue is vague, start with Research.
-- If the issue is already well-defined, you may skip straight to Plan or Execute.
-- For simple/quick tasks, use Quick Flow (bmad-quick-flow).
+- **ALWAYS include ALL phases that the issue description requests.** If the issue says "Research → Define → Plan → Execute → Review", you MUST create tasks for ALL five phases — no skipping.
+- You may ONLY skip phases if the issue description does NOT mention them and the work is genuinely trivial (e.g., a one-line config change).
+- When in doubt, include more phases rather than fewer. Research and Define phases are almost always needed.
+- For simple/quick tasks where a single agent can handle everything end-to-end, use Quick Flow (bmad-quick-flow).
 - Set priority based on the parent issue priority and task criticality.
 
 ## Output Format
@@ -288,7 +322,22 @@ Respond with ONLY a JSON object (no markdown fences, no explanation outside the 
   "approvalReason": null
 }
 
-Set requiresApproval=true if: budget impact > $1000, irreversible infrastructure changes, or unclear scope needing human clarification.`;
+Set requiresApproval=true if: budget impact > $1000, irreversible infrastructure changes, or unclear scope needing human clarification.
+
+## Decision Authority
+You are authorized to make ALL decisions autonomously EXCEPT:
+- Changing product direction (requires board)
+- Budget above 80% spent (switch to critical-only; if no critical work, escalate)
+- Irreversible infrastructure decisions (requires board)
+- Scope increase > 50% (requires board)
+
+For everything else: DECIDE and PROCEED. Post your reasoning as a comment.
+Do NOT set requiresApproval to true unless one of the above conditions applies.
+
+## Learnings
+If the system message contains "Learnings from Previous Epics", review them and apply relevant lessons to this delegation plan.
+For example: if past retros show schema changes need Architect review, include an Architect review step for stories that touch the schema.
+Cite which learning informed each decision when applicable.`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -703,6 +752,21 @@ export async function orchestrateCeoIssue(
 
   await client.addIssueComment(issue.id, summaryLines.join("\n"));
 
+  // Ensure parent issue is in_progress after delegation.
+  // In board-access mode, Paperclip's checkout may not always transition
+  // the status (checkoutRunId=null). Explicitly set it here.
+  if (issue.status !== "in_progress") {
+    try {
+      await client.updateIssue(issue.id, { status: "in_progress" });
+      log.info("Parent issue transitioned to in_progress", { issueId: issue.id });
+    } catch (statusErr) {
+      log.warn("Could not transition parent to in_progress (non-critical)", {
+        issueId: issue.id,
+        error: statusErr instanceof Error ? statusErr.message : String(statusErr),
+      });
+    }
+  }
+
   log.info("CEO orchestration complete", {
     issueId: issue.id,
     subtasksCreated,
@@ -725,69 +789,104 @@ export async function orchestrateCeoIssue(
 /**
  * Build a re-evaluation prompt for the CEO.
  *
- * Gives the CEO the full picture of all sub-issues and their statuses so it
- * can decide which backlog tasks to promote, whether to reassign stuck tasks,
- * or whether the parent issue can be closed.
+ * Gives the CEO the full picture of all sub-issues — status, assignee,
+ * workPhase, staleness, and metadata — so it can detect stuck issues and
+ * prescribe unblocking actions. This is the CEO's "sanity check" pass.
  */
 function buildReEvaluationPrompt(
   parentIssue: PaperclipIssue,
   children: PaperclipIssue[],
 ): string {
+  const now = Date.now();
   const childSummary = children
     .map((c) => {
       const meta = c.metadata as Record<string, unknown> | undefined;
       const taskIndex = meta?.taskIndex ?? "?";
       const phase = meta?.bmadPhase ?? "?";
+      const workPhase = meta?.workPhase ?? "NOT SET";
+      const storySeq = meta?.storySequence;
       const deps = Array.isArray(meta?.dependsOn) ? (meta.dependsOn as number[]).join(", ") : "none";
-      return `  - [${taskIndex}] "${c.title}" — status: ${c.status}, phase: ${phase}, dependsOn: [${deps}], assignee: ${c.assigneeAgentId ?? "unassigned"}`;
+      const updatedAt = c.updatedAt ? new Date(c.updatedAt).toISOString() : "unknown";
+      const ageMin = c.updatedAt ? Math.round((now - new Date(c.updatedAt).getTime()) / 60_000) : null;
+      const ageSuffix = ageMin !== null ? ` (${ageMin}m ago)` : "";
+      return [
+        `  - [taskIndex=${taskIndex}] "${c.title}"`,
+        `    id: ${c.id}`,
+        `    status: ${c.status}, workPhase: ${workPhase}, bmadPhase: ${phase}`,
+        `    assignee: ${c.assigneeAgentId ?? "NONE"}`,
+        `    dependsOn: [${deps}]${storySeq != null ? `, storySequence: ${storySeq}` : ""}`,
+        `    lastUpdated: ${updatedAt}${ageSuffix}`,
+      ].join("\n");
     })
     .join("\n");
 
-  return `You are the CEO re-evaluating your delegation plan. A specialist has completed work and you need to check if any blocked tasks can now proceed.
+  return `You are the CEO performing a sanity check on your delegation pipeline. Your job is to detect and unblock any stuck issues.
 
 ## Parent Issue
 - **Title**: ${parentIssue.title}
 - **ID**: ${parentIssue.id}
+- **Status**: ${parentIssue.status}
 
-## Current Sub-Issue Statuses
+## Current Sub-Issue States
 ${childSummary}
 
-## Your Task
+## Agent-to-WorkPhase Mapping
+These are the correct workPhase → agent assignments:
+- \`create-story\` → bmad-sm (Scrum Master creates story details)
+- \`dev-story\` → bmad-dev (Developer implements the story)
+- \`code-review\` → bmad-qa (QA reviews the implementation)
+- \`sprint-planning\` → bmad-sm
+- \`research\` / \`domain-research\` / \`technical-research\` → bmad-analyst
+- \`create-prd\` → bmad-pm
+- \`create-architecture\` → bmad-architect
 
-Review the sub-issues and decide what actions to take. For each decision, provide your reasoning.
+## Stuck-Issue Detection Rules
+Check each non-done issue for these red flags:
+1. **No assignee** — status is "todo" or "in_progress" but assigneeAgentId is NONE → must assign the correct agent
+2. **No workPhase** — workPhase is "NOT SET" → must set the correct workPhase based on bmadPhase and task content
+3. **Wrong assignee for workPhase** — e.g., workPhase is "dev-story" but assigned to bmad-sm → reassign to bmad-dev
+4. **Backlog with all deps done** — dependsOn tasks are all "done" but issue is still "backlog" → promote to "todo"
+5. **Stale in_progress** — status is "in_progress" for >30 minutes with no progress → may need reassignment
+6. **All children done** — if every sub-issue is "done", close the parent
 
-### Rules
-- A backlog task can be promoted to "todo" if ALL of its \`dependsOn\` tasks have status "done".
-- If all sub-issues are "done" or "cancelled", the parent issue should be marked "done".
-- If a task is stuck ("blocked" or stalled), you may reassign or add a comment to unblock.
-- If something unexpected happened, you may create additional sub-issues.
-- Do NOT promote a task if its prerequisites are not yet "done".
+## Available Actions
+
+\`\`\`json
+{ "type": "fix", "issueId": "<id>", "newAssignee": "bmad-dev", "setStatus": "todo", "setWorkPhase": "dev-story", "reason": "Issue had no assignee" }
+{ "type": "promote", "issueId": "<id>", "reason": "All prerequisites done" }
+{ "type": "reassign", "issueId": "<id>", "newAssignee": "bmad-qa", "reason": "Wrong agent assigned" }
+{ "type": "comment", "issueId": "<id>", "body": "Checking on progress..." }
+{ "type": "close_parent", "reason": "All sub-tasks are complete" }
+\`\`\`
+
+The \`fix\` action is the most powerful — it can set status, workPhase, AND assignee in one atomic update. Use it whenever an issue needs multiple fields corrected.
 
 ## Output Format
 
 Respond with ONLY a JSON object:
 
+\`\`\`json
 {
-  "actions": [
-    { "type": "promote", "issueId": "<id>", "reason": "All prerequisites done" },
-    { "type": "comment", "issueId": "<id>", "body": "Checking on progress..." },
-    { "type": "close_parent", "reason": "All sub-tasks are complete" }
-  ],
-  "summary": "Brief status update"
+  "actions": [ ... ],
+  "summary": "Brief description of what was found and fixed"
 }
+\`\`\`
 
-If no actions are needed, return \`{ "actions": [], "summary": "No changes needed" }\`.`;
+If everything looks healthy, return \`{ "actions": [], "summary": "All issues progressing normally" }\`.`;
 }
 
 /**
  * Parse a re-evaluation action from the CEO's response.
  */
 interface ReEvalAction {
-  type: "promote" | "comment" | "close_parent" | "reassign";
+  type: "promote" | "comment" | "close_parent" | "reassign" | "fix";
   issueId?: string;
   reason?: string;
   body?: string;
   newAssignee?: string;
+  /** For "fix" actions: patch metadata fields + status + assignee in one shot */
+  setStatus?: string;
+  setWorkPhase?: string;
 }
 
 /**
@@ -813,13 +912,15 @@ function parseReEvaluationResponse(response: string): { actions: ReEvalAction[];
     if (Array.isArray(parsed.actions)) {
       for (const a of parsed.actions as Record<string, unknown>[]) {
         const type = String(a.type ?? "");
-        if (["promote", "comment", "close_parent", "reassign"].includes(type)) {
+        if (["promote", "comment", "close_parent", "reassign", "fix"].includes(type)) {
           actions.push({
             type: type as ReEvalAction["type"],
             issueId: a.issueId ? String(a.issueId) : undefined,
             reason: a.reason ? String(a.reason) : undefined,
             body: a.body ? String(a.body) : undefined,
             newAssignee: a.newAssignee ? String(a.newAssignee) : undefined,
+            setStatus: a.setStatus ? String(a.setStatus) : undefined,
+            setWorkPhase: a.setWorkPhase ? String(a.setWorkPhase) : undefined,
           });
         }
       }
@@ -894,17 +995,41 @@ export async function reEvaluateDelegation(
     }
   }
 
-  // Deterministic promotion: promote backlog tasks whose deps are all "done"
+  // M1: Separate refined stories (SM-created with storySequence) from
+  // CEO-delegated skeleton tasks. Skeleton tasks use dependency-based
+  // promotion; refined stories use sequential (one-at-a-time) promotion.
+  const storyIssues = activeChildren.filter(c => isRefinedStory(c));
+  const nonStoryIssues = activeChildren.filter(c => !isRefinedStory(c));
+
+  // DEBUG: trace re-evaluation classification
+  log.info("Re-evaluation classification", {
+    totalActive: activeChildren.length,
+    storyCount: storyIssues.length,
+    nonStoryCount: nonStoryIssues.length,
+    taskStatusByIndex: Object.fromEntries(taskStatusByIndex),
+    children: activeChildren.map(c => ({
+      id: c.id.slice(0, 8),
+      title: c.title?.slice(0, 40),
+      status: c.status,
+      bmadPhase: (c.metadata as Record<string, unknown> | undefined)?.bmadPhase,
+      taskIndex: (c.metadata as Record<string, unknown> | undefined)?.taskIndex,
+      storySequence: (c.metadata as Record<string, unknown> | undefined)?.storySequence,
+      dependsOn: (c.metadata as Record<string, unknown> | undefined)?.dependsOn,
+      isRefined: isRefinedStory(c),
+    })),
+  });
+
+  // Non-story issues: existing behavior (dependency-based promotion)
   let promoted = 0;
-  for (const child of backlogChildren) {
+  for (const child of nonStoryIssues) {
+    if (child.status !== "backlog") continue;
     const meta = child.metadata as Record<string, unknown> | undefined;
     const dependsOn = Array.isArray(meta?.dependsOn) ? (meta.dependsOn as number[]) : [];
 
     if (dependsOn.length === 0) {
-      // No deps but still in backlog — promote (shouldn't normally happen)
       await client.updateIssue(child.id, { status: "todo" });
       promoted++;
-      log.info("Promoted task (no deps)", { issueId: child.id, title: child.title });
+      log.info("Promoted non-story task (no deps)", { issueId: child.id, title: child.title });
       continue;
     }
 
@@ -916,10 +1041,206 @@ export async function reEvaluateDelegation(
     if (allDepsDone) {
       await client.updateIssue(child.id, { status: "todo" });
       promoted++;
-      log.info("Promoted task (deps met)", {
+      log.info("Promoted non-story task (deps met)", {
         issueId: child.id,
         title: child.title,
         dependsOn,
+      });
+    }
+  }
+
+  // M1: Story issues — sequential promotion (one at a time)
+  if (storyIssues.length > 0) {
+    const sortedStories = [...storyIssues].sort((a, b) => {
+      const seqA = getSequence(a);
+      const seqB = getSequence(b);
+      return seqA - seqB;
+    });
+
+    const firstNonDone = sortedStories.find(s => s.status !== "done");
+    // DEBUG: trace sequential promotion decision
+    log.info("Sequential story promotion check", {
+      sortedIds: sortedStories.map(s => ({ id: s.id.slice(0, 8), seq: getSequence(s), status: s.status })),
+      firstNonDone: firstNonDone ? { id: firstNonDone.id.slice(0, 8), status: firstNonDone.status, title: firstNonDone.title?.slice(0, 40) } : null,
+    });
+    if (firstNonDone && firstNonDone.status === "backlog") {
+      // Check if dependencies are met
+      const meta = firstNonDone.metadata as Record<string, unknown> | undefined;
+      const dependsOn = Array.isArray(meta?.dependsOn) ? (meta.dependsOn as number[]) : [];
+      const depsOk = dependsOn.length === 0 || dependsOn.every((depIdx) => {
+        const depStatus = taskStatusByIndex.get(depIdx);
+        return depStatus === "done";
+      });
+
+      // DEBUG: trace dependency resolution for sequential story
+      log.info("Sequential story deps check", {
+        issueId: firstNonDone.id.slice(0, 8),
+        dependsOn,
+        depsOk,
+        depStatuses: dependsOn.map(d => ({ idx: d, status: taskStatusByIndex.get(d) ?? "NOT_FOUND" })),
+      });
+
+      if (depsOk) {
+        // Promote to todo. If the story already has a workPhase (e.g., "dev-story"
+        // from create_story), preserve it. Only default to "create-story" for
+        // skeleton tasks that haven't been refined yet.
+        const existingWorkPhase = meta?.workPhase as string | undefined;
+        const targetWorkPhase = existingWorkPhase || "create-story";
+
+        // Resolve the correct agent based on the target workPhase.
+        // Each phase maps to a specific BMAD agent role.
+        const PHASE_AGENT_MAP: Record<string, string> = {
+          "create-story": "bmad-sm",
+          "dev-story": "bmad-dev",
+          "code-review": "bmad-qa",
+          "sprint-planning": "bmad-sm",
+        };
+        const agentRole = PHASE_AGENT_MAP[targetWorkPhase] ?? "bmad-dev";
+        const assigneeId = await resolveAgentId(agentRole, client);
+
+        log.info("Sequential story promoting", {
+          issueId: firstNonDone.id.slice(0, 8),
+          assigneeId: assigneeId?.slice(0, 8),
+          agentRole,
+          workPhase: targetWorkPhase,
+          preservedExisting: !!existingWorkPhase,
+        });
+        await client.updateIssue(firstNonDone.id, {
+          status: "todo",
+          ...(assigneeId ? { assigneeAgentId: assigneeId } : {}),
+          metadata: {
+            ...(firstNonDone.metadata as Record<string, unknown> | undefined),
+            workPhase: targetWorkPhase,
+          },
+        });
+        promoted++;
+        log.info("Sequential story promotion", {
+          issueId: firstNonDone.id,
+          title: firstNonDone.title,
+          sequence: getSequence(firstNonDone),
+        });
+      }
+    }
+  }
+
+  // M3: Check for epic completion — trigger retrospective
+  if (storyIssues.length > 0) {
+    const epicIds = [...new Set(
+      storyIssues
+        .map(s => (s.metadata as Record<string, unknown> | undefined)?.epicId)
+        .filter((id): id is string => typeof id === "string"),
+    )];
+
+    for (const epicId of epicIds) {
+      const epicStories = storyIssues.filter(s =>
+        (s.metadata as Record<string, unknown> | undefined)?.epicId === epicId,
+      );
+      const allEpicDone = epicStories.every(s => s.status === "done");
+      const retroExists = nonStoryIssues.some(c =>
+        (c.metadata as Record<string, unknown> | undefined)?.isRetrospective === true &&
+        (c.metadata as Record<string, unknown> | undefined)?.epicId === epicId,
+      );
+
+      if (allEpicDone && !retroExists) {
+        // Create retro sub-issue assigned to SM
+        const smId = await resolveAgentId("bmad-sm", client);
+        try {
+          await client.createIssue({
+            title: `Epic ${epicId} Retrospective`,
+            description:
+              `All stories for epic ${epicId} are complete. ` +
+              `Run the bmad-retrospective skill. ` +
+              `Analyze: what worked, what didn't, review patterns, E2E coverage. ` +
+              `Save the retrospective report as \`_bmad-output/epic-${epicId}-retrospective.md\`.`,
+            status: "todo",
+            assigneeAgentId: smId,
+            parentId: parentIssue.id,
+            metadata: {
+              bmadPhase: "review",
+              workPhase: "retrospective",
+              isRetrospective: true,
+              epicId,
+            },
+          });
+          log.info("Epic retro issue created", { epicId, parentId: parentIssue.id });
+        } catch (err) {
+          log.warn("Failed to create retro issue", {
+            epicId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+  }
+
+  // M3-4: Extract learnings from completed retrospectives
+  const completedRetros = activeChildren.filter(c =>
+    c.status === "done" &&
+    (c.metadata as Record<string, unknown> | undefined)?.isRetrospective === true &&
+    !(c.metadata as Record<string, unknown> | undefined)?.learningsExtracted,
+  );
+
+  for (const retro of completedRetros) {
+    const retroMeta = retro.metadata as Record<string, unknown> | undefined;
+    const epicId = retroMeta?.epicId;
+    if (typeof epicId !== "string") continue;
+
+    const workspaceCwd = config.targetProjectRoot ?? process.cwd();
+    const retroFilePath = resolve(workspaceCwd, `_bmad-output/epic-${epicId}-retrospective.md`);
+
+    if (!existsSync(retroFilePath)) {
+      log.warn("Retro file not found, skipping learnings extraction", { epicId, retroFilePath });
+      continue;
+    }
+
+    try {
+      // Create a CEO session to extract durable learnings
+      const ceoAgent = getAgent("ceo") ?? getAgent("bmad-ceo") ?? {
+        name: "ceo",
+        displayName: "CEO - Chief Executive",
+        description: "Strategic orchestrator",
+        prompt: "You are the CEO. You orchestrate, not execute.",
+      };
+
+      const extractionStrategy = loadModelStrategyConfig();
+      const extractionModel = resolveModel("ceo-reeval", {}, extractionStrategy);
+      const extractionSessionId = await sessionManager.createAgentSession({
+        agent: ceoAgent,
+        allAgents,
+        tools: [],
+        model: extractionModel.model,
+        systemMessage: config.agentSystemMessage,
+      });
+
+      const retroContent = readFileSync(retroFilePath, "utf-8");
+      const extraction = await sessionManager.sendAndWait(
+        extractionSessionId,
+        `Read this retrospective report and extract 3-5 durable, actionable learnings ` +
+        `that should inform future epic delegation. Format as a markdown list with brief ` +
+        `explanations. Focus on process improvements, not task-specific details.\n\n` +
+        retroContent,
+        60_000,
+      );
+
+      // Save to PARA memory
+      const learningsPath = resolve(workspaceCwd, `_bmad-output/memory/learnings/epic-${epicId}.md`);
+      mkdirSync(dirname(learningsPath), { recursive: true });
+      writeFileSync(learningsPath, `# Learnings from Epic ${epicId}\n\n${extraction}\n`);
+
+      // Mark as extracted so we don't re-process
+      await client.updateIssue(retro.id, {
+        metadata: { ...retroMeta, learningsExtracted: true },
+      });
+
+      log.info("Learnings extracted from retro", { epicId, learningsPath });
+      await client.addIssueComment(
+        parentIssue.id,
+        `📝 **CEO — Learnings extracted** from epic ${epicId} retrospective and saved to memory.`,
+      );
+    } catch (err) {
+      log.warn("Failed to extract learnings from retro", {
+        epicId,
+        error: err instanceof Error ? err.message : String(err),
       });
     }
   }
@@ -947,17 +1268,51 @@ export async function reEvaluateDelegation(
     return { success: true, promoted, allDone: false };
   }
 
-  // ── 5. No deterministic promotions — use LLM for complex reasoning ─
-  // This handles edge cases: stuck tasks, reassignment, unexpected states
-  const hasStuckTasks = activeChildren.some(
-    (c) => c.status === "blocked" || c.status === "in_progress",
-  );
+  // ── 5. LLM sanity check — detect and unblock stuck issues ──────────
+  // No deterministic promotions happened. Ask the CEO LLM to scan all
+  // non-done issues for problems: missing assignee, wrong workPhase,
+  // backlog items whose deps are actually done, stale in_progress, etc.
+  // This acts as a safety net — if mechanical rules missed something,
+  // the LLM can still fix it.
 
-  if (!hasStuckTasks) {
-    // Everything is either backlog (waiting) or in-progress — nothing to do
-    log.info("No promotions needed, no stuck tasks — CEO re-evaluation idle");
+  // Quick heuristic: detect obvious stuck signals to decide whether
+  // the LLM call is worth the cost/latency. We cast a wider net than
+  // before — any non-done issue with a potential problem triggers it.
+  const hasAnomalies = activeChildren.some((c) => {
+    if (c.status === "done" || c.status === "cancelled") return false;
+    const meta = c.metadata as Record<string, unknown> | undefined;
+    // No assignee on a todo/in_progress issue
+    if ((c.status === "todo" || c.status === "in_progress") && !c.assigneeAgentId) return true;
+    // No workPhase set
+    if (!meta?.workPhase) return true;
+    // Backlog issue — might have had deps resolved but not promoted
+    if (c.status === "backlog") return true;
+    // Stale in_progress (>20 min since last update)
+    if (c.status === "in_progress" && c.updatedAt) {
+      const ageMs = Date.now() - new Date(c.updatedAt).getTime();
+      if (ageMs > 20 * 60_000) return true;
+    }
+    // Explicit blocked status
+    if (c.status === "blocked") return true;
+    return false;
+  });
+
+  if (!hasAnomalies) {
+    log.info("No promotions needed, no anomalies detected — CEO re-evaluation idle");
     return { success: true, promoted: 0, allDone: false };
   }
+
+  log.info("Anomalies detected — running CEO LLM sanity check", {
+    issueId: parentIssue.id,
+    anomalies: activeChildren
+      .filter(c => c.status !== "done" && c.status !== "cancelled")
+      .map(c => ({
+        id: c.id.slice(0, 8),
+        status: c.status,
+        hasAssignee: !!c.assigneeAgentId,
+        workPhase: (c.metadata as Record<string, unknown> | undefined)?.workPhase ?? "NONE",
+      })),
+  });
 
   // Use LLM to reason about stuck/complex situations
   const ceoAgentDef = getAgent("ceo") ?? getAgent("bmad-ceo") ?? {
@@ -1040,6 +1395,47 @@ export async function reEvaluateDelegation(
             }
           }
           break;
+        case "fix": {
+          // Atomic fix: patch status, workPhase, and assignee in one update.
+          // This is the CEO's "unblock" action — fixes multiple fields at once.
+          if (!action.issueId) break;
+          const fixIssue = activeChildren.find(c => c.id === action.issueId);
+          const fixMeta = fixIssue?.metadata as Record<string, unknown> | undefined;
+
+          // Build the update payload
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const fixUpdate: Record<string, any> = {};
+          if (action.setStatus) {
+            fixUpdate.status = action.setStatus;
+          }
+          // Resolve assignee by role name
+          if (action.newAssignee) {
+            const fixAgentId = await resolveAgentId(action.newAssignee, client);
+            if (fixAgentId) {
+              fixUpdate.assigneeAgentId = fixAgentId;
+            }
+          }
+          // Patch metadata (preserve existing, override workPhase)
+          if (action.setWorkPhase) {
+            fixUpdate.metadata = {
+              ...(fixMeta ?? {}),
+              workPhase: action.setWorkPhase,
+            };
+          }
+
+          if (Object.keys(fixUpdate).length > 0) {
+            await client.updateIssue(action.issueId, fixUpdate);
+            if (action.setStatus === "todo") promoted++;
+            log.info("CEO fix applied", {
+              issueId: action.issueId,
+              reason: action.reason,
+              setStatus: action.setStatus,
+              setWorkPhase: action.setWorkPhase,
+              newAssignee: action.newAssignee,
+            });
+          }
+          break;
+        }
       }
     } catch (err) {
       log.warn("CEO re-eval action failed", {
@@ -1051,7 +1447,7 @@ export async function reEvaluateDelegation(
   }
 
   if (result.summary) {
-    await client.addIssueComment(parentIssue.id, `🔄 **CEO — Re-evaluation:** ${result.summary}`);
+    await client.addIssueComment(parentIssue.id, `� **CEO — Sanity Check:** ${result.summary}`);
   }
 
   return { success: true, promoted, allDone: false };

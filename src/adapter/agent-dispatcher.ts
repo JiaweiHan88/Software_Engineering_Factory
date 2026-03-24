@@ -20,7 +20,7 @@ import {
   devStoryTool,
   codeReviewTool,
   codeReviewResultTool,
-  sprintStatusTool,
+  issueStatusTool,
   qualityGateEvaluateTool,
 } from "../tools/index.js";
 import type { Tool } from "../tools/types.js";
@@ -178,7 +178,7 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
     "create-story": {
       agentName: "bmad-pm",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [createStoryTool, sprintStatusTool] as Tool<any>[],
+      tools: [createStoryTool, issueStatusTool] as Tool<any>[],
       buildPrompt: (item, _config) => [
         `@bmad-pm Use the create_story tool to create a new story:`,
         `- epic_id: "${item.epicId ?? "epic-1"}"`,
@@ -186,7 +186,7 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
         `- story_title: "${item.storyTitle ?? "Untitled Story"}"`,
         `- story_description: "${item.storyDescription ?? "No description provided."}"`,
         ``,
-        `After creating the story, confirm the sprint status was updated.`,
+        `After creating the story, confirm the Paperclip issue was created.`,
         item.extraContext ? `\nAdditional context:\n${item.extraContext}` : "",
       ].filter(Boolean).join("\n"),
     },
@@ -194,7 +194,7 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
     "dev-story": {
       agentName: "bmad-dev",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [devStoryTool, sprintStatusTool] as Tool<any>[],
+      tools: [devStoryTool, issueStatusTool] as Tool<any>[],
       buildPrompt: (item, config) => {
         const storyPath = resolve(config.outputDir, "stories", `${item.storyId}.md`);
         return [
@@ -203,7 +203,8 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
           `- story_file_path: "${storyPath}"`,
           ``,
           `Read the story file for acceptance criteria and implement accordingly.`,
-          `When implementation is complete, use sprint_status to move the story to 'review'.`,
+          `When implementation is complete, use issue_status tool with action='reassign'`,
+          `and target_role='bmad-qa' to hand off for code review.`,
           item.extraContext ? `\nAdditional context:\n${item.extraContext}` : "",
         ].filter(Boolean).join("\n");
       },
@@ -212,7 +213,7 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
     "code-review": {
       agentName: "bmad-qa",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [codeReviewTool, codeReviewResultTool, qualityGateEvaluateTool, sprintStatusTool] as Tool<any>[],
+      tools: [codeReviewTool, codeReviewResultTool, qualityGateEvaluateTool, issueStatusTool] as Tool<any>[],
       buildPrompt: (item, config) => {
         const storyPath = resolve(config.outputDir, "stories", `${item.storyId}.md`);
         return [
@@ -226,7 +227,9 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
           `- HIGH/CRITICAL findings: BLOCK and require fixes`,
           ``,
           `After review, use code_review_result to record your verdict.`,
-          `If approved, use sprint_status to move the story to 'done'.`,
+          `If approved, the issue status will be updated to 'done' automatically.`,
+          `If rejected, use issue_status tool with action='reassign' and target_role='bmad-dev'`,
+          `to send back for fixes.`,
           item.extraContext ? `\nAdditional context:\n${item.extraContext}` : "",
         ].filter(Boolean).join("\n");
       },
@@ -235,10 +238,10 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
     "sprint-planning": {
       agentName: "bmad-sm",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [sprintStatusTool, createStoryTool] as Tool<any>[],
+      tools: [issueStatusTool, createStoryTool] as Tool<any>[],
       buildPrompt: (item, _config) => [
-        `@bmad-sm Review the current sprint status and plan the next set of work.`,
-        `Use the sprint_status tool to read current state.`,
+        `@bmad-sm Review the current issue status and plan the next set of work.`,
+        `Use the issue_status tool with action='read' to get current state.`,
         `Identify stories that need to move forward.`,
         item.extraContext ? `\nContext:\n${item.extraContext}` : "",
       ].filter(Boolean).join("\n"),
@@ -247,9 +250,9 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
     "sprint-status": {
       agentName: "bmad-sm",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [sprintStatusTool] as Tool<any>[],
+      tools: [issueStatusTool] as Tool<any>[],
       buildPrompt: (_item, _config) => [
-        `@bmad-sm Use the sprint_status tool to read the current sprint status.`,
+        `@bmad-sm Use the issue_status tool with action='read' to read the current issue statuses.`,
         `Provide a brief summary of the sprint state.`,
       ].join("\n"),
     },
@@ -261,28 +264,28 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
     "research": {
       agentName: "bmad-analyst",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [sprintStatusTool] as Tool<any>[],
+      tools: [issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-analyst", "research"),
     },
 
     "domain-research": {
       agentName: "bmad-analyst",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [sprintStatusTool] as Tool<any>[],
+      tools: [issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-analyst", "domain research"),
     },
 
     "market-research": {
       agentName: "bmad-pm",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [sprintStatusTool] as Tool<any>[],
+      tools: [issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-pm", "market research"),
     },
 
     "technical-research": {
       agentName: "bmad-architect",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [sprintStatusTool] as Tool<any>[],
+      tools: [issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-architect", "technical research"),
     },
 
@@ -293,28 +296,28 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
     "create-prd": {
       agentName: "bmad-pm",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [sprintStatusTool] as Tool<any>[],
+      tools: [issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-pm", "PRD creation"),
     },
 
     "create-architecture": {
       agentName: "bmad-architect",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [sprintStatusTool] as Tool<any>[],
+      tools: [issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-architect", "architecture design"),
     },
 
     "create-ux-design": {
       agentName: "bmad-ux-designer",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [sprintStatusTool] as Tool<any>[],
+      tools: [issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-ux-designer", "UX design"),
     },
 
     "create-product-brief": {
       agentName: "bmad-pm",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [sprintStatusTool] as Tool<any>[],
+      tools: [issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-pm", "product brief creation"),
     },
 
@@ -325,14 +328,14 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
     "create-epics": {
       agentName: "bmad-pm",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [createStoryTool, sprintStatusTool] as Tool<any>[],
+      tools: [createStoryTool, issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-pm", "epic and story creation"),
     },
 
     "check-implementation-readiness": {
       agentName: "bmad-pm",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [sprintStatusTool] as Tool<any>[],
+      tools: [issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-pm", "implementation readiness check"),
     },
 
@@ -343,21 +346,21 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
     "e2e-tests": {
       agentName: "bmad-qa",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [codeReviewTool, qualityGateEvaluateTool, sprintStatusTool] as Tool<any>[],
+      tools: [codeReviewTool, qualityGateEvaluateTool, issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-qa", "end-to-end test generation"),
     },
 
     "documentation": {
       agentName: "bmad-tech-writer",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [sprintStatusTool] as Tool<any>[],
+      tools: [issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-tech-writer", "documentation"),
     },
 
     "quick-dev": {
       agentName: "bmad-quick-flow-solo-dev",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [devStoryTool, createStoryTool, codeReviewTool, sprintStatusTool] as Tool<any>[],
+      tools: [devStoryTool, createStoryTool, codeReviewTool, issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-quick-flow-solo-dev", "quick development"),
     },
 
@@ -368,7 +371,7 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
     "editorial-review": {
       agentName: "bmad-tech-writer",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [sprintStatusTool] as Tool<any>[],
+      tools: [issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-tech-writer", "editorial review"),
     },
 

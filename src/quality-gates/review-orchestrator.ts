@@ -28,6 +28,7 @@ import { evaluateGate, decideNextAction, formatGateReport, formatReviewTimeline 
 import type { BmadConfig } from "../config/config.js";
 import type { AgentDispatcher, DispatchResult } from "../adapter/agent-dispatcher.js";
 import { readSprintStatus, writeSprintStatus } from "../tools/sprint-status.js";
+import { tryGetToolContext } from "../tools/tool-context.js";
 import { Logger } from "../observability/logger.js";
 import { traceQualityGate } from "../observability/tracing.js";
 import { recordReviewPass, recordGateVerdict } from "../observability/metrics.js";
@@ -494,7 +495,8 @@ export class ReviewOrchestrator {
           ``,
           `Fix ALL blocking findings. Do NOT use dev_story tool (already in-progress).`,
           `Read each file, apply the fix, then move on to the next finding.`,
-          `After fixing all issues, use sprint_status to move the story back to 'review'.`,
+          `After fixing all issues, use issue_status tool with action='reassign'`,
+          `and target_role='bmad-qa' to hand off back for re-review.`,
         ].join("\n"),
       },
       onDelta,
@@ -502,12 +504,38 @@ export class ReviewOrchestrator {
   }
 
   /**
-   * Transition a story's status in sprint-status.yaml.
+   * Transition a story's status.
+   *
+   * M2: Tries Paperclip issue update first (via tool context), then
+   * falls back to sprint-status.yaml for backward compatibility.
    */
   private async transitionStory(
     storyId: string,
     newStatus: "done" | "review" | "in-progress",
   ): Promise<void> {
+    // M2: Try Paperclip issue update first
+    const toolCtx = tryGetToolContext();
+    if (toolCtx) {
+      try {
+        const meta = (await toolCtx.paperclipClient.getIssue(toolCtx.issueId)).metadata as Record<string, unknown> | undefined;
+        await toolCtx.paperclipClient.updateIssue(toolCtx.issueId, {
+          status: newStatus,
+          metadata: {
+            ...meta,
+            lastReviewResult: newStatus === "done" ? "pass" : "pending",
+          },
+        });
+        log.info("Story transitioned via Paperclip", { storyId, newStatus, issueId: toolCtx.issueId });
+        return;
+      } catch (err) {
+        log.warn("Paperclip transition failed, falling back to YAML", {
+          storyId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Fallback: sprint-status.yaml (deprecated)
     const sprintData = await readSprintStatus(this.config.sprintStatusPath);
     const story = sprintData.sprint.stories.find((s) => s.id === storyId);
     if (story) {

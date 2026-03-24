@@ -1,8 +1,12 @@
 /**
- * create-story tool — BMAD story creation workflow.
+ * create-story tool — BMAD story creation workflow (Paperclip-backed).
  *
- * Called by the PM agent to generate a comprehensive story markdown file
- * and register it in the sprint tracker.
+ * Called by the PM/SM agent to generate a comprehensive story markdown file,
+ * write it to the workspace, and create a corresponding Paperclip issue.
+ *
+ * Migration: Now creates a Paperclip issue in addition to the workspace
+ * file. The issue status starts as 'backlog' — the CEO promotes to 'todo'
+ * when ready (sequential story promotion in M1).
  *
  * @module tools/create-story
  */
@@ -11,8 +15,8 @@ import { writeFile, mkdir } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { z } from "zod";
 import { defineTool } from "./types.js";
+import { tryGetToolContext } from "./tool-context.js";
 import { loadConfig } from "../config/index.js";
-import { readSprintStatus, writeSprintStatus } from "./sprint-status.js";
 
 /**
  * Generate a BMAD story markdown template.
@@ -27,7 +31,7 @@ function generateStoryMarkdown(args: {
 
 **Story ID:** ${args.storyId}
 **Epic:** ${args.epicId}
-**Status:** ready-for-dev
+**Status:** backlog
 
 ## Description
 
@@ -65,14 +69,15 @@ ${args.storyDescription}
 /**
  * Copilot SDK tool: create_story
  *
- * Generates a story markdown file and adds it to the sprint tracker
- * with status 'ready-for-dev'.
+ * Generates a story markdown file, writes it to the workspace, and creates
+ * a corresponding Paperclip issue with status 'backlog'. The CEO will promote
+ * stories to 'todo' sequentially when ready.
  */
 export const createStoryTool = defineTool("create_story", {
   description:
     "Create a new BMAD user story file with acceptance criteria, tasks, and developer notes. " +
-    "Writes the story to _bmad-output/stories/{story_id}.md and registers it in sprint-status.yaml " +
-    "with status 'ready-for-dev'.",
+    "Writes the story to _bmad-output/stories/{story_id}.md and creates a corresponding " +
+    "Paperclip issue with status 'backlog'. The CEO will promote stories to 'todo' when ready.",
   parameters: z.object({
     epic_id: z
       .string()
@@ -87,10 +92,16 @@ export const createStoryTool = defineTool("create_story", {
       .string()
       .default("No description provided.")
       .describe("Brief description of what the story delivers"),
+    story_sequence: z
+      .number()
+      .optional()
+      .describe("Sequence number within the epic for ordering (e.g., 1, 2, 3)"),
   }),
   handler: async (args) => {
     const config = loadConfig();
+    const ctx = tryGetToolContext();
     const storyDir = resolve(config.outputDir, "stories");
+    const storyRelativePath = `_bmad-output/stories/${args.story_id}.md`;
     const storyPath = resolve(storyDir, `${args.story_id}.md`);
 
     // 1. Generate story markdown
@@ -101,29 +112,88 @@ export const createStoryTool = defineTool("create_story", {
       epicId: args.epic_id,
     });
 
-    // 2. Write story file
+    // 2. Write story file to workspace
     await mkdir(dirname(storyPath), { recursive: true });
     await writeFile(storyPath, markdown, "utf-8");
 
-    // 3. Register in sprint-status.yaml
-    const sprintData = await readSprintStatus(config.sprintStatusPath);
-    const existing = sprintData.sprint.stories.find((s) => s.id === args.story_id);
-    if (!existing) {
-      sprintData.sprint.stories.push({
-        id: args.story_id,
-        title: args.story_title,
-        status: "ready-for-dev",
-        reviewPasses: 0,
-      });
-      await writeSprintStatus(config.sprintStatusPath, sprintData);
+    // 3. Create Paperclip issue (if tool context is available)
+    let paperclipIssueId: string | undefined;
+    let paperclipIdentifier: string | undefined;
+
+    if (ctx) {
+      try {
+        const parentIssueId = ctx.parentIssueId ?? ctx.issueId;
+
+        // Dedup guard: check if a story with this storyId already exists under the parent.
+        // This prevents duplicate story creation when agents are re-woken.
+        const existingSiblings = await ctx.paperclipClient.listIssues({ parentId: parentIssueId });
+        const duplicate = existingSiblings.find((s) => {
+          const meta = s.metadata as Record<string, unknown> | undefined;
+          return (
+            meta?.storyId === args.story_id &&
+            s.status !== "cancelled"
+          );
+        });
+
+        if (duplicate) {
+          return {
+            textResultForLlm: [
+              `Story already exists: ${args.story_id} — "${args.story_title}"`,
+              `Paperclip issue: ${duplicate.identifier ?? duplicate.id} (status: ${duplicate.status})`,
+              `File: ${storyPath}`,
+              `Skipped duplicate creation — story is already tracked in Paperclip.`,
+            ].join("\n"),
+            resultType: "success" as const,
+          };
+        }
+
+        const issue = await ctx.paperclipClient.createIssue({
+          title: args.story_title,
+          description: [
+            args.story_description,
+            ``,
+            `---`,
+            `*Story ID: ${args.story_id} | Epic: ${args.epic_id}*`,
+            `*Story file: \`${storyRelativePath}\`*`,
+          ].join("\n"),
+          status: "backlog",
+          parentId: parentIssueId,
+          metadata: {
+            bmadPhase: "execute",
+            storyId: args.story_id,
+            storyFilePath: storyRelativePath,
+            epicId: args.epic_id,
+            storySequence: args.story_sequence ?? 0,
+            workPhase: "dev-story",
+            reviewPasses: 0,
+          },
+        });
+
+        paperclipIssueId = issue.id;
+        paperclipIdentifier = issue.identifier;
+      } catch (err) {
+        // Non-fatal — the story file was already written to the workspace
+        const errMsg = err instanceof Error ? err.message : String(err);
+        return {
+          textResultForLlm: [
+            `Story file created: ${args.story_id} — "${args.story_title}"`,
+            `File: ${storyPath}`,
+            `⚠️ Paperclip issue creation failed: ${errMsg}`,
+            `The story file exists in the workspace but is not tracked in Paperclip.`,
+          ].join("\n"),
+          resultType: "success" as const,
+        };
+      }
     }
 
     return {
       textResultForLlm: [
         `Story created: ${args.story_id} — "${args.story_title}"`,
         `File: ${storyPath}`,
-        `Sprint status: registered as 'ready-for-dev' in sprint ${sprintData.sprint.number}`,
-        `Next step: Developer agent should run dev_story tool to implement this story.`,
+        paperclipIssueId
+          ? `Paperclip issue: ${paperclipIdentifier ?? paperclipIssueId} (status: backlog)`
+          : `Note: No Paperclip context — story file created locally only.`,
+        `Next step: CEO will promote this story to 'todo' when ready for implementation.`,
       ].join("\n"),
       resultType: "success" as const,
     };

@@ -123,6 +123,30 @@ export const createStoryTool = defineTool("create_story", {
     if (ctx) {
       try {
         const parentIssueId = ctx.parentIssueId ?? ctx.issueId;
+
+        // Dedup guard: check if a story with this storyId already exists under the parent.
+        // This prevents duplicate story creation when agents are re-woken.
+        const existingSiblings = await ctx.paperclipClient.listIssues({ parentId: parentIssueId });
+        const duplicate = existingSiblings.find((s) => {
+          const meta = s.metadata as Record<string, unknown> | undefined;
+          return (
+            meta?.storyId === args.story_id &&
+            s.status !== "cancelled"
+          );
+        });
+
+        if (duplicate) {
+          return {
+            textResultForLlm: [
+              `Story already exists: ${args.story_id} — "${args.story_title}"`,
+              `Paperclip issue: ${duplicate.identifier ?? duplicate.id} (status: ${duplicate.status})`,
+              `File: ${storyPath}`,
+              `Skipped duplicate creation — story is already tracked in Paperclip.`,
+            ].join("\n"),
+            resultType: "success" as const,
+          };
+        }
+
         const issue = await ctx.paperclipClient.createIssue({
           title: args.story_title,
           description: [

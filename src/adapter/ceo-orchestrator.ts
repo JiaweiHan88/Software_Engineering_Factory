@@ -1044,15 +1044,29 @@ export async function reEvaluateDelegation(
       });
 
       if (depsOk) {
-        // Promote to todo and assign to SM for detailed story creation
-        const smAgentId = await resolveAgentId("bmad-sm", client);
-        log.info("Sequential story promoting", { issueId: firstNonDone.id.slice(0, 8), smAgentId: smAgentId?.slice(0, 8) });
+        // Promote to todo. If the story already has a workPhase (e.g., "dev-story"
+        // from create_story), preserve it. Only default to "create-story" for
+        // skeleton tasks that haven't been refined yet.
+        const existingWorkPhase = meta?.workPhase as string | undefined;
+        const targetWorkPhase = existingWorkPhase || "create-story";
+
+        // Assign to SM only for create-story; for dev-story, leave assignee unchanged
+        // (the dev/quick-flow agent should pick it up)
+        const needsSm = targetWorkPhase === "create-story";
+        const smAgentId = needsSm ? await resolveAgentId("bmad-sm", client) : undefined;
+
+        log.info("Sequential story promoting", {
+          issueId: firstNonDone.id.slice(0, 8),
+          smAgentId: smAgentId?.slice(0, 8),
+          workPhase: targetWorkPhase,
+          preservedExisting: !!existingWorkPhase,
+        });
         await client.updateIssue(firstNonDone.id, {
           status: "todo",
           ...(smAgentId ? { assigneeAgentId: smAgentId } : {}),
           metadata: {
             ...(firstNonDone.metadata as Record<string, unknown> | undefined),
-            workPhase: "create-story",
+            workPhase: targetWorkPhase,
           },
         });
         promoted++;

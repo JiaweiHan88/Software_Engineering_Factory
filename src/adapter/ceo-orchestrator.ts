@@ -789,69 +789,104 @@ export async function orchestrateCeoIssue(
 /**
  * Build a re-evaluation prompt for the CEO.
  *
- * Gives the CEO the full picture of all sub-issues and their statuses so it
- * can decide which backlog tasks to promote, whether to reassign stuck tasks,
- * or whether the parent issue can be closed.
+ * Gives the CEO the full picture of all sub-issues — status, assignee,
+ * workPhase, staleness, and metadata — so it can detect stuck issues and
+ * prescribe unblocking actions. This is the CEO's "sanity check" pass.
  */
 function buildReEvaluationPrompt(
   parentIssue: PaperclipIssue,
   children: PaperclipIssue[],
 ): string {
+  const now = Date.now();
   const childSummary = children
     .map((c) => {
       const meta = c.metadata as Record<string, unknown> | undefined;
       const taskIndex = meta?.taskIndex ?? "?";
       const phase = meta?.bmadPhase ?? "?";
+      const workPhase = meta?.workPhase ?? "NOT SET";
+      const storySeq = meta?.storySequence;
       const deps = Array.isArray(meta?.dependsOn) ? (meta.dependsOn as number[]).join(", ") : "none";
-      return `  - [${taskIndex}] "${c.title}" — status: ${c.status}, phase: ${phase}, dependsOn: [${deps}], assignee: ${c.assigneeAgentId ?? "unassigned"}`;
+      const updatedAt = c.updatedAt ? new Date(c.updatedAt).toISOString() : "unknown";
+      const ageMin = c.updatedAt ? Math.round((now - new Date(c.updatedAt).getTime()) / 60_000) : null;
+      const ageSuffix = ageMin !== null ? ` (${ageMin}m ago)` : "";
+      return [
+        `  - [taskIndex=${taskIndex}] "${c.title}"`,
+        `    id: ${c.id}`,
+        `    status: ${c.status}, workPhase: ${workPhase}, bmadPhase: ${phase}`,
+        `    assignee: ${c.assigneeAgentId ?? "NONE"}`,
+        `    dependsOn: [${deps}]${storySeq != null ? `, storySequence: ${storySeq}` : ""}`,
+        `    lastUpdated: ${updatedAt}${ageSuffix}`,
+      ].join("\n");
     })
     .join("\n");
 
-  return `You are the CEO re-evaluating your delegation plan. A specialist has completed work and you need to check if any blocked tasks can now proceed.
+  return `You are the CEO performing a sanity check on your delegation pipeline. Your job is to detect and unblock any stuck issues.
 
 ## Parent Issue
 - **Title**: ${parentIssue.title}
 - **ID**: ${parentIssue.id}
+- **Status**: ${parentIssue.status}
 
-## Current Sub-Issue Statuses
+## Current Sub-Issue States
 ${childSummary}
 
-## Your Task
+## Agent-to-WorkPhase Mapping
+These are the correct workPhase → agent assignments:
+- \`create-story\` → bmad-sm (Scrum Master creates story details)
+- \`dev-story\` → bmad-dev (Developer implements the story)
+- \`code-review\` → bmad-qa (QA reviews the implementation)
+- \`sprint-planning\` → bmad-sm
+- \`research\` / \`domain-research\` / \`technical-research\` → bmad-analyst
+- \`create-prd\` → bmad-pm
+- \`create-architecture\` → bmad-architect
 
-Review the sub-issues and decide what actions to take. For each decision, provide your reasoning.
+## Stuck-Issue Detection Rules
+Check each non-done issue for these red flags:
+1. **No assignee** — status is "todo" or "in_progress" but assigneeAgentId is NONE → must assign the correct agent
+2. **No workPhase** — workPhase is "NOT SET" → must set the correct workPhase based on bmadPhase and task content
+3. **Wrong assignee for workPhase** — e.g., workPhase is "dev-story" but assigned to bmad-sm → reassign to bmad-dev
+4. **Backlog with all deps done** — dependsOn tasks are all "done" but issue is still "backlog" → promote to "todo"
+5. **Stale in_progress** — status is "in_progress" for >30 minutes with no progress → may need reassignment
+6. **All children done** — if every sub-issue is "done", close the parent
 
-### Rules
-- A backlog task can be promoted to "todo" if ALL of its \`dependsOn\` tasks have status "done".
-- If all sub-issues are "done" or "cancelled", the parent issue should be marked "done".
-- If a task is stuck ("blocked" or stalled), you may reassign or add a comment to unblock.
-- If something unexpected happened, you may create additional sub-issues.
-- Do NOT promote a task if its prerequisites are not yet "done".
+## Available Actions
+
+\`\`\`json
+{ "type": "fix", "issueId": "<id>", "newAssignee": "bmad-dev", "setStatus": "todo", "setWorkPhase": "dev-story", "reason": "Issue had no assignee" }
+{ "type": "promote", "issueId": "<id>", "reason": "All prerequisites done" }
+{ "type": "reassign", "issueId": "<id>", "newAssignee": "bmad-qa", "reason": "Wrong agent assigned" }
+{ "type": "comment", "issueId": "<id>", "body": "Checking on progress..." }
+{ "type": "close_parent", "reason": "All sub-tasks are complete" }
+\`\`\`
+
+The \`fix\` action is the most powerful — it can set status, workPhase, AND assignee in one atomic update. Use it whenever an issue needs multiple fields corrected.
 
 ## Output Format
 
 Respond with ONLY a JSON object:
 
+\`\`\`json
 {
-  "actions": [
-    { "type": "promote", "issueId": "<id>", "reason": "All prerequisites done" },
-    { "type": "comment", "issueId": "<id>", "body": "Checking on progress..." },
-    { "type": "close_parent", "reason": "All sub-tasks are complete" }
-  ],
-  "summary": "Brief status update"
+  "actions": [ ... ],
+  "summary": "Brief description of what was found and fixed"
 }
+\`\`\`
 
-If no actions are needed, return \`{ "actions": [], "summary": "No changes needed" }\`.`;
+If everything looks healthy, return \`{ "actions": [], "summary": "All issues progressing normally" }\`.`;
 }
 
 /**
  * Parse a re-evaluation action from the CEO's response.
  */
 interface ReEvalAction {
-  type: "promote" | "comment" | "close_parent" | "reassign";
+  type: "promote" | "comment" | "close_parent" | "reassign" | "fix";
   issueId?: string;
   reason?: string;
   body?: string;
   newAssignee?: string;
+  /** For "fix" actions: patch metadata fields + status + assignee in one shot */
+  setStatus?: string;
+  setWorkPhase?: string;
 }
 
 /**
@@ -877,13 +912,15 @@ function parseReEvaluationResponse(response: string): { actions: ReEvalAction[];
     if (Array.isArray(parsed.actions)) {
       for (const a of parsed.actions as Record<string, unknown>[]) {
         const type = String(a.type ?? "");
-        if (["promote", "comment", "close_parent", "reassign"].includes(type)) {
+        if (["promote", "comment", "close_parent", "reassign", "fix"].includes(type)) {
           actions.push({
             type: type as ReEvalAction["type"],
             issueId: a.issueId ? String(a.issueId) : undefined,
             reason: a.reason ? String(a.reason) : undefined,
             body: a.body ? String(a.body) : undefined,
             newAssignee: a.newAssignee ? String(a.newAssignee) : undefined,
+            setStatus: a.setStatus ? String(a.setStatus) : undefined,
+            setWorkPhase: a.setWorkPhase ? String(a.setWorkPhase) : undefined,
           });
         }
       }
@@ -1231,17 +1268,51 @@ export async function reEvaluateDelegation(
     return { success: true, promoted, allDone: false };
   }
 
-  // ── 5. No deterministic promotions — use LLM for complex reasoning ─
-  // This handles edge cases: stuck tasks, reassignment, unexpected states
-  const hasStuckTasks = activeChildren.some(
-    (c) => c.status === "blocked" || c.status === "in_progress",
-  );
+  // ── 5. LLM sanity check — detect and unblock stuck issues ──────────
+  // No deterministic promotions happened. Ask the CEO LLM to scan all
+  // non-done issues for problems: missing assignee, wrong workPhase,
+  // backlog items whose deps are actually done, stale in_progress, etc.
+  // This acts as a safety net — if mechanical rules missed something,
+  // the LLM can still fix it.
 
-  if (!hasStuckTasks) {
-    // Everything is either backlog (waiting) or in-progress — nothing to do
-    log.info("No promotions needed, no stuck tasks — CEO re-evaluation idle");
+  // Quick heuristic: detect obvious stuck signals to decide whether
+  // the LLM call is worth the cost/latency. We cast a wider net than
+  // before — any non-done issue with a potential problem triggers it.
+  const hasAnomalies = activeChildren.some((c) => {
+    if (c.status === "done" || c.status === "cancelled") return false;
+    const meta = c.metadata as Record<string, unknown> | undefined;
+    // No assignee on a todo/in_progress issue
+    if ((c.status === "todo" || c.status === "in_progress") && !c.assigneeAgentId) return true;
+    // No workPhase set
+    if (!meta?.workPhase) return true;
+    // Backlog issue — might have had deps resolved but not promoted
+    if (c.status === "backlog") return true;
+    // Stale in_progress (>20 min since last update)
+    if (c.status === "in_progress" && c.updatedAt) {
+      const ageMs = Date.now() - new Date(c.updatedAt).getTime();
+      if (ageMs > 20 * 60_000) return true;
+    }
+    // Explicit blocked status
+    if (c.status === "blocked") return true;
+    return false;
+  });
+
+  if (!hasAnomalies) {
+    log.info("No promotions needed, no anomalies detected — CEO re-evaluation idle");
     return { success: true, promoted: 0, allDone: false };
   }
+
+  log.info("Anomalies detected — running CEO LLM sanity check", {
+    issueId: parentIssue.id,
+    anomalies: activeChildren
+      .filter(c => c.status !== "done" && c.status !== "cancelled")
+      .map(c => ({
+        id: c.id.slice(0, 8),
+        status: c.status,
+        hasAssignee: !!c.assigneeAgentId,
+        workPhase: (c.metadata as Record<string, unknown> | undefined)?.workPhase ?? "NONE",
+      })),
+  });
 
   // Use LLM to reason about stuck/complex situations
   const ceoAgentDef = getAgent("ceo") ?? getAgent("bmad-ceo") ?? {
@@ -1324,6 +1395,47 @@ export async function reEvaluateDelegation(
             }
           }
           break;
+        case "fix": {
+          // Atomic fix: patch status, workPhase, and assignee in one update.
+          // This is the CEO's "unblock" action — fixes multiple fields at once.
+          if (!action.issueId) break;
+          const fixIssue = activeChildren.find(c => c.id === action.issueId);
+          const fixMeta = fixIssue?.metadata as Record<string, unknown> | undefined;
+
+          // Build the update payload
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const fixUpdate: Record<string, any> = {};
+          if (action.setStatus) {
+            fixUpdate.status = action.setStatus;
+          }
+          // Resolve assignee by role name
+          if (action.newAssignee) {
+            const fixAgentId = await resolveAgentId(action.newAssignee, client);
+            if (fixAgentId) {
+              fixUpdate.assigneeAgentId = fixAgentId;
+            }
+          }
+          // Patch metadata (preserve existing, override workPhase)
+          if (action.setWorkPhase) {
+            fixUpdate.metadata = {
+              ...(fixMeta ?? {}),
+              workPhase: action.setWorkPhase,
+            };
+          }
+
+          if (Object.keys(fixUpdate).length > 0) {
+            await client.updateIssue(action.issueId, fixUpdate);
+            if (action.setStatus === "todo") promoted++;
+            log.info("CEO fix applied", {
+              issueId: action.issueId,
+              reason: action.reason,
+              setStatus: action.setStatus,
+              setWorkPhase: action.setWorkPhase,
+              newAssignee: action.newAssignee,
+            });
+          }
+          break;
+        }
       }
     } catch (err) {
       log.warn("CEO re-eval action failed", {
@@ -1335,7 +1447,7 @@ export async function reEvaluateDelegation(
   }
 
   if (result.summary) {
-    await client.addIssueComment(parentIssue.id, `🔄 **CEO — Re-evaluation:** ${result.summary}`);
+    await client.addIssueComment(parentIssue.id, `� **CEO — Sanity Check:** ${result.summary}`);
   }
 
   return { success: true, promoted, allDone: false };

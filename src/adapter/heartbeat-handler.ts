@@ -22,12 +22,6 @@ import type { PaperclipReporter } from "./reporter.js";
 import type { ReviewOrchestrator } from "../quality-gates/review-orchestrator.js";
 import { reassignIssue } from "./issue-reassignment.js";
 import { tryGetToolContext } from "../tools/tool-context.js";
-import {
-  createStoryBranch,
-  commitChanges,
-  pushBranch,
-  createPR,
-} from "./git-integration.js";
 import { Logger } from "../observability/logger.js";
 
 const log = Logger.child("heartbeat-handler");
@@ -97,22 +91,6 @@ export async function handleHeartbeat(
     issueId: ctx.issue.id,
   });
 
-  // M4: Create story branch before dev-story dispatch
-  const storyIdForGit = ctx.issue.storyId ?? ctx.issue.id;
-  if (phase === "dev-story") {
-    const toolCtxPreDispatch = tryGetToolContext();
-    const gitCwd = toolCtxPreDispatch?.workspaceDir;
-    try {
-      const branchName = await createStoryBranch(storyIdForGit, { cwd: gitCwd });
-      log.info("Story branch ready", { branchName, storyId: storyIdForGit });
-    } catch (err) {
-      log.warn("Git branch creation failed (non-fatal, continuing dispatch)", {
-        storyId: storyIdForGit,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
   // 4. Dispatch to the agent
   const result = await dispatcher.dispatch(
     {
@@ -134,29 +112,6 @@ export async function handleHeartbeat(
   }
 
   // 5. M1: Auto-reassign after successful dispatch based on completed phase
-  // M4: Commit and push after dev-story dispatch
-  if (phase === "dev-story") {
-    const toolCtxGit = tryGetToolContext();
-    const gitCwd = toolCtxGit?.workspaceDir;
-    try {
-      const commitResult = await commitChanges(
-        storyIdForGit,
-        `Implementation for ${ctx.issue.title ?? storyIdForGit}`,
-        { cwd: gitCwd },
-      );
-      if (commitResult.success && commitResult.stdout !== "Nothing to commit") {
-        const branchName = `story/${storyIdForGit}`;
-        await pushBranch(branchName, { cwd: gitCwd });
-        log.info("Dev-story changes committed and pushed", { storyId: storyIdForGit });
-      }
-    } catch (err) {
-      log.warn("Git commit/push failed after dev-story (non-fatal)", {
-        storyId: storyIdForGit,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
   const toolCtx = tryGetToolContext();
   if (toolCtx) {
     try {
@@ -318,27 +273,6 @@ async function handleCodeReview(
       } catch {
         // Non-fatal
       }
-    }
-
-    // M4: Create PR after review approval
-    const gitCwd = toolCtx?.workspaceDir;
-    try {
-      const branchName = `story/${storyId}`;
-      // Commit any review-pass fixes
-      await commitChanges(storyId, `Review pass ${result.totalPasses} - approved`, { cwd: gitCwd });
-      await pushBranch(branchName, { cwd: gitCwd });
-      const prUrl = await createPR(
-        storyId,
-        issue.title ?? storyId,
-        `Story: ${issue.title}\n\nReview passed on pass ${result.totalPasses}.\n${result.summary}`,
-        { cwd: gitCwd },
-      );
-      log.info("PR created after review approval", { storyId, prUrl });
-    } catch (err) {
-      log.warn("PR creation failed after review approval (non-fatal)", {
-        storyId,
-        error: err instanceof Error ? err.message : String(err),
-      });
     }
 
     return { status: "completed", message: `Review passed (${result.totalPasses} passes)`, storyId };

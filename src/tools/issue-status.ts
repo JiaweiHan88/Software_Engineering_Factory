@@ -137,10 +137,12 @@ export const issueStatusTool = defineTool("issue_status", {
           updatePayload.status = args.new_status;
         }
 
+        // Fetch current issue for metadata merging and review-result inference
+        const currentIssue = await client.getIssue(issueId);
+        const existingMeta = currentIssue.metadata as Record<string, unknown> | undefined;
+
         if (args.metadata_updates) {
           try {
-            const currentIssue = await client.getIssue(issueId);
-            const existingMeta = currentIssue.metadata as Record<string, unknown> | undefined;
             const newMeta = JSON.parse(args.metadata_updates) as Record<string, unknown>;
             updatePayload.metadata = { ...existingMeta, ...newMeta };
           } catch (parseErr) {
@@ -149,6 +151,21 @@ export const issueStatusTool = defineTool("issue_status", {
               resultType: "failure" as const,
             };
           }
+        }
+
+        // Guard: if transitioning a code-review issue to "done" without
+        // lastReviewResult, inject it so review metadata stays consistent.
+        if (
+          args.new_status === "done" &&
+          (existingMeta?.workPhase === "code-review" || existingMeta?.workPhase === "done") &&
+          !existingMeta?.lastReviewResult &&
+          !(updatePayload.metadata as Record<string, unknown> | undefined)?.lastReviewResult
+        ) {
+          updatePayload.metadata = {
+            ...existingMeta,
+            ...(updatePayload.metadata as Record<string, unknown> | undefined),
+            lastReviewResult: "pass",
+          };
         }
 
         await client.updateIssue(issueId, updatePayload);

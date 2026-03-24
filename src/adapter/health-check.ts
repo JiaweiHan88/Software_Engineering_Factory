@@ -59,7 +59,7 @@ const REQUIRED_TOOL_NAMES = [
   "dev_story",
   "code_review",
   "code_review_result",
-  "sprint_status",
+  "issue_status",
 ] as const;
 
 /**

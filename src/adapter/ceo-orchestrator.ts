@@ -279,9 +279,10 @@ Analyze this issue and create a delegation plan with dependency-aware scheduling
 ### Critical Rules
 - Each sub-task description MUST be self-contained with enough context for the agent.
 - In each task description, explicitly state what prerequisite outputs the agent should read from the workspace (if any).
-- Do NOT skip necessary phases. If the issue is vague, start with Research.
-- If the issue is already well-defined, you may skip straight to Plan or Execute.
-- For simple/quick tasks, use Quick Flow (bmad-quick-flow).
+- **ALWAYS include ALL phases that the issue description requests.** If the issue says "Research → Define → Plan → Execute → Review", you MUST create tasks for ALL five phases — no skipping.
+- You may ONLY skip phases if the issue description does NOT mention them and the work is genuinely trivial (e.g., a one-line config change).
+- When in doubt, include more phases rather than fewer. Research and Define phases are almost always needed.
+- For simple/quick tasks where a single agent can handle everything end-to-end, use Quick Flow (bmad-quick-flow).
 - Set priority based on the parent issue priority and task criticality.
 
 ## Output Format
@@ -750,6 +751,21 @@ export async function orchestrateCeoIssue(
   );
 
   await client.addIssueComment(issue.id, summaryLines.join("\n"));
+
+  // Ensure parent issue is in_progress after delegation.
+  // In board-access mode, Paperclip's checkout may not always transition
+  // the status (checkoutRunId=null). Explicitly set it here.
+  if (issue.status !== "in_progress") {
+    try {
+      await client.updateIssue(issue.id, { status: "in_progress" });
+      log.info("Parent issue transitioned to in_progress", { issueId: issue.id });
+    } catch (statusErr) {
+      log.warn("Could not transition parent to in_progress (non-critical)", {
+        issueId: issue.id,
+        error: statusErr instanceof Error ? statusErr.message : String(statusErr),
+      });
+    }
+  }
 
   log.info("CEO orchestration complete", {
     issueId: issue.id,

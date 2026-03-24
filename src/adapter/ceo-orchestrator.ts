@@ -1050,20 +1050,27 @@ export async function reEvaluateDelegation(
         const existingWorkPhase = meta?.workPhase as string | undefined;
         const targetWorkPhase = existingWorkPhase || "create-story";
 
-        // Assign to SM only for create-story; for dev-story, leave assignee unchanged
-        // (the dev/quick-flow agent should pick it up)
-        const needsSm = targetWorkPhase === "create-story";
-        const smAgentId = needsSm ? await resolveAgentId("bmad-sm", client) : undefined;
+        // Resolve the correct agent based on the target workPhase.
+        // Each phase maps to a specific BMAD agent role.
+        const PHASE_AGENT_MAP: Record<string, string> = {
+          "create-story": "bmad-sm",
+          "dev-story": "bmad-dev",
+          "code-review": "bmad-qa",
+          "sprint-planning": "bmad-sm",
+        };
+        const agentRole = PHASE_AGENT_MAP[targetWorkPhase] ?? "bmad-dev";
+        const assigneeId = await resolveAgentId(agentRole, client);
 
         log.info("Sequential story promoting", {
           issueId: firstNonDone.id.slice(0, 8),
-          smAgentId: smAgentId?.slice(0, 8),
+          assigneeId: assigneeId?.slice(0, 8),
+          agentRole,
           workPhase: targetWorkPhase,
           preservedExisting: !!existingWorkPhase,
         });
         await client.updateIssue(firstNonDone.id, {
           status: "todo",
-          ...(smAgentId ? { assigneeAgentId: smAgentId } : {}),
+          ...(assigneeId ? { assigneeAgentId: assigneeId } : {}),
           metadata: {
             ...(firstNonDone.metadata as Record<string, unknown> | undefined),
             workPhase: targetWorkPhase,

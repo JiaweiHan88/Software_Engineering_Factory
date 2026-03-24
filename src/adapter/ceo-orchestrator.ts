@@ -288,7 +288,7 @@ Analyze this issue and create a delegation plan with dependency-aware scheduling
 - **Create tasks for Research, Define, and Plan phases ONLY.** Execute and Review are handled automatically after Plan.
 - If the issue mentions "Execute" or "Review", include a Plan task — the SM will create stories for implementation, and code review happens automatically on the same ticket.
 - **NEVER create tasks with phase "execute" or "review".** The only valid phases in your output are: "research", "define", "plan".
-- When in doubt, include more phases rather than fewer. Research and Define phases are almost always needed.
+- When the issue scope warrants it, include research and define phases. For complex or ambiguous tasks, these phases are critical. For very simple tasks, you may skip them — but err on the side of inclusion.
 - For simple/quick tasks where a single agent can handle everything end-to-end, use Quick Flow (bmad-quick-flow).
 - Set priority based on the parent issue priority and task criticality.
 

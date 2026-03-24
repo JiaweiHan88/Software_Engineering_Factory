@@ -194,13 +194,29 @@ export function clearAgentIdCache(): void {
  * Used for sequential story promotion (M1) — stories within an epic
  * are promoted one at a time in sequence order.
  *
+ * Falls back to `taskIndex` when `storySequence` is not set (e.g., CEO-
+ * delegated skeleton tasks that haven't been refined by the SM yet).
+ *
  * @param issue - Paperclip issue with metadata
  * @returns Sequence number (defaults to 0 if not set)
  */
 function getSequence(issue: PaperclipIssue): number {
   const meta = issue.metadata as Record<string, unknown> | undefined;
   const seq = meta?.storySequence;
-  return typeof seq === "number" ? seq : 0;
+  if (typeof seq === "number") return seq;
+  // Fallback to taskIndex so CEO-delegated execute tasks sort in dependency order
+  const idx = meta?.taskIndex;
+  return typeof idx === "number" ? idx : 0;
+}
+
+/**
+ * Check if an issue is an SM-created story (has storySequence metadata).
+ * CEO-delegated skeleton tasks have bmadPhase="execute" but no storySequence;
+ * those should use dependency-based promotion, not sequential promotion.
+ */
+function isRefinedStory(issue: PaperclipIssue): boolean {
+  const meta = issue.metadata as Record<string, unknown> | undefined;
+  return typeof meta?.storySequence === "number";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -926,13 +942,29 @@ export async function reEvaluateDelegation(
     }
   }
 
-  // M1: Separate story issues from non-story issues
-  const storyIssues = activeChildren.filter(c =>
-    (c.metadata as Record<string, unknown> | undefined)?.bmadPhase === "execute",
-  );
-  const nonStoryIssues = activeChildren.filter(c =>
-    (c.metadata as Record<string, unknown> | undefined)?.bmadPhase !== "execute",
-  );
+  // M1: Separate refined stories (SM-created with storySequence) from
+  // CEO-delegated skeleton tasks. Skeleton tasks use dependency-based
+  // promotion; refined stories use sequential (one-at-a-time) promotion.
+  const storyIssues = activeChildren.filter(c => isRefinedStory(c));
+  const nonStoryIssues = activeChildren.filter(c => !isRefinedStory(c));
+
+  // DEBUG: trace re-evaluation classification
+  log.info("Re-evaluation classification", {
+    totalActive: activeChildren.length,
+    storyCount: storyIssues.length,
+    nonStoryCount: nonStoryIssues.length,
+    taskStatusByIndex: Object.fromEntries(taskStatusByIndex),
+    children: activeChildren.map(c => ({
+      id: c.id.slice(0, 8),
+      title: c.title?.slice(0, 40),
+      status: c.status,
+      bmadPhase: (c.metadata as Record<string, unknown> | undefined)?.bmadPhase,
+      taskIndex: (c.metadata as Record<string, unknown> | undefined)?.taskIndex,
+      storySequence: (c.metadata as Record<string, unknown> | undefined)?.storySequence,
+      dependsOn: (c.metadata as Record<string, unknown> | undefined)?.dependsOn,
+      isRefined: isRefinedStory(c),
+    })),
+  });
 
   // Non-story issues: existing behavior (dependency-based promotion)
   let promoted = 0;
@@ -973,6 +1005,11 @@ export async function reEvaluateDelegation(
     });
 
     const firstNonDone = sortedStories.find(s => s.status !== "done");
+    // DEBUG: trace sequential promotion decision
+    log.info("Sequential story promotion check", {
+      sortedIds: sortedStories.map(s => ({ id: s.id.slice(0, 8), seq: getSequence(s), status: s.status })),
+      firstNonDone: firstNonDone ? { id: firstNonDone.id.slice(0, 8), status: firstNonDone.status, title: firstNonDone.title?.slice(0, 40) } : null,
+    });
     if (firstNonDone && firstNonDone.status === "backlog") {
       // Check if dependencies are met
       const meta = firstNonDone.metadata as Record<string, unknown> | undefined;
@@ -982,9 +1019,18 @@ export async function reEvaluateDelegation(
         return depStatus === "done";
       });
 
+      // DEBUG: trace dependency resolution for sequential story
+      log.info("Sequential story deps check", {
+        issueId: firstNonDone.id.slice(0, 8),
+        dependsOn,
+        depsOk,
+        depStatuses: dependsOn.map(d => ({ idx: d, status: taskStatusByIndex.get(d) ?? "NOT_FOUND" })),
+      });
+
       if (depsOk) {
         // Promote to todo and assign to SM for detailed story creation
         const smAgentId = await resolveAgentId("bmad-sm", client);
+        log.info("Sequential story promoting", { issueId: firstNonDone.id.slice(0, 8), smAgentId: smAgentId?.slice(0, 8) });
         await client.updateIssue(firstNonDone.id, {
           status: "todo",
           ...(smAgentId ? { assigneeAgentId: smAgentId } : {}),

@@ -118,10 +118,14 @@ const PHASE_TIER_MAP: Record<WorkPhase, ModelTier> = {
   "check-implementation-readiness": "standard",
   // Execute phase (extensions)
   "e2e-tests": "standard",
+  "test-design": "standard",
   "documentation": "fast",
+  "generate-project-context": "fast",
   "quick-dev": "standard",
   // Review phase (extensions)
   "editorial-review": "fast",
+  "epic-retrospective": "standard",
+  "correct-course": "standard",
   // Generic delegated work
   "delegated-task": "standard",
   // CEO orchestration (strategic reasoning needs powerful tier)

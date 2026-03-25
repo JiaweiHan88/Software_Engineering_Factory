@@ -45,6 +45,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     agentConfigDir: "ceo",
     bmadSkills: [
       "bmad-help",
+      "bmad-party-mode",
     ],
     tools: ["issue_status"],
   },
@@ -56,6 +57,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     agentConfigDir: "ceo",
     bmadSkills: [
       "bmad-help",
+      "bmad-party-mode",
     ],
     tools: ["issue_status"],
   },

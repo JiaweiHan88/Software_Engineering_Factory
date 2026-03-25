@@ -885,6 +885,71 @@ async function verifySetup(agentIds: Map<string, string>): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Step 5b: Seed generate-project-context issue
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Create the initial generate-project-context issue assigned to the tech-writer.
+ *
+ * This seeds the first heartbeat so the tech-writer auto-generates
+ * project-context.md on the first run. Idempotent — skipped if a
+ * generate-project-context issue already exists.
+ */
+async function ensureProjectContextIssue(agentIds: Map<string, string>): Promise<void> {
+  header("Step 5b: Seed generate-project-context Issue");
+
+  if (FLAGS.dryRun) {
+    log("🏃", "Dry run — skipping issue creation");
+    return;
+  }
+
+  // Check if one already exists
+  const existing = await paperclip<{ items?: unknown[]; data?: unknown[] }>(
+    "GET",
+    `/api/companies/${COMPANY_ID}/issues?status=todo&limit=50`,
+  );
+  const items = (existing.items ?? existing.data ?? existing) as Array<Record<string, unknown>>;
+  const alreadyExists = Array.isArray(items) && items.some(
+    (i) => (i.metadata as Record<string, unknown> | undefined)?.workPhase === "generate-project-context",
+  );
+
+  if (alreadyExists) {
+    log("♻️ ", "generate-project-context issue already exists — skipping");
+    return;
+  }
+
+  const techWriterId = agentIds.get("bmad-tech-writer");
+  if (!techWriterId) {
+    log(`${YELLOW}⚠️${NC}`, "Tech writer agent not found — skipping generate-project-context issue");
+    return;
+  }
+
+  try {
+    const issue = await paperclip<{ id: string; identifier?: string }>(
+      "POST",
+      `/api/companies/${COMPANY_ID}/issues`,
+      {
+        title: "Generate project context file",
+        description:
+          "Run the bmad-generate-project-context skill to produce project-context.md. " +
+          "Use defaults from _bmad/bmm/config.yaml. Analyze the codebase and save the output. " +
+          "Mark this issue done when complete.",
+        status: "todo",
+        assigneeAgentId: techWriterId,
+        metadata: {
+          workPhase: "generate-project-context",
+          bmadPhase: "define",
+          delegatedBy: "setup-script",
+        },
+      },
+    );
+    log(`${GREEN}✅${NC}`, `Created generate-project-context issue: ${issue.identifier ?? issue.id}`);
+  } catch (err) {
+    log(`${YELLOW}⚠️${NC}`, `Failed to create generate-project-context issue (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -919,6 +984,9 @@ async function main(): Promise<void> {
 
   // Step 5: Set instructions paths
   await setInstructionsPaths(agentIds);
+
+  // Step 5b: Create generate-project-context seed issue (if not already present)
+  await ensureProjectContextIssue(agentIds);
 
   // Step 6: Verify
   await verifySetup(agentIds);

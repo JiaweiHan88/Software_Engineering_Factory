@@ -65,10 +65,14 @@ export type WorkPhase =
   | "check-implementation-readiness"
   // ── Execute phase (extensions) ────────────────────────────────────
   | "e2e-tests"
+  | "test-design"
   | "documentation"
+  | "generate-project-context"
   | "quick-dev"
   // ── Review phase (extensions) ─────────────────────────────────────
   | "editorial-review"
+  | "epic-retrospective"
+  | "correct-course"
   // ── Generic delegated work ────────────────────────────────────────
   | "delegated-task"
   // ── CEO orchestration phases ──────────────────────────────────────
@@ -126,6 +130,30 @@ interface PhaseConfig {
   agentName: string;
   tools: Tool<unknown>[];
   buildPrompt: (item: WorkItem, config: BmadConfig) => string;
+}
+
+/**
+ * Build a workspace context block for inclusion in dispatch prompts.
+ *
+ * Only includes lines whose values are non-null/empty. When Paperclip injects
+ * workspace context (PAPERCLIP_WORKSPACE_CWD, _REPO_URL, _BRANCH, etc.) via the
+ * process adapter, agents can see exactly what repo and branch they are operating on.
+ */
+export function buildWorkspaceContext(env: {
+  workspaceCwd?: string;
+  workspaceRepoUrl?: string;
+  workspaceBranch?: string;
+  workspaceStrategy?: string;
+  workspaceWorktreePath?: string;
+}): string {
+  const lines: string[] = [];
+  if (env.workspaceCwd) lines.push(`- **Working directory:** \`${env.workspaceCwd}\``);
+  if (env.workspaceRepoUrl) lines.push(`- **Repository:** ${env.workspaceRepoUrl}`);
+  if (env.workspaceBranch) lines.push(`- **Branch:** \`${env.workspaceBranch}\``);
+  if (env.workspaceStrategy) lines.push(`- **Workspace strategy:** ${env.workspaceStrategy}`);
+  if (env.workspaceWorktreePath) lines.push(`- **Worktree path:** \`${env.workspaceWorktreePath}\``);
+  if (lines.length === 0) return "";
+  return [`## Workspace`, ...lines, ``].join("\n");
 }
 
 /**
@@ -375,7 +403,33 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
       agentName: "bmad-qa",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [codeReviewTool, qualityGateEvaluateTool, issueStatusTool] as Tool<any>[],
-      buildPrompt: contextPrompt("bmad-qa", "end-to-end test generation (use bmad-qa-generate-e2e-tests skill)"),
+      buildPrompt: contextPrompt(
+        "bmad-qa",
+        "end-to-end test generation (use bmad-qa-generate-e2e-tests skill for ad-hoc E2E tests, bmad-testarch-atdd for acceptance-test-driven design, bmad-testarch-automate for expanding automation coverage)",
+      ),
+    },
+
+    "test-design": {
+      agentName: "bmad-qa",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [issueStatusTool] as Tool<any>[],
+      buildPrompt: (item, config) => [
+        `@bmad-qa Create a risk-based test design for the following feature or epic.`,
+        ``,
+        `## Task: ${item.storyTitle ?? "Untitled"}`,
+        ``,
+        item.storyDescription ?? "No description provided.",
+        ``,
+        `## Instructions`,
+        `1. Run the \`bmad-testarch-test-design\` skill in **Create mode [C]**.`,
+        `2. Load story context from \`${config.outputDir}/stories/\` (if available).`,
+        `3. Produce an epic-level test plan covering risk assessment, coverage strategy,`,
+        `   acceptance criteria traceability, and automation recommendations.`,
+        `4. Save the test design as \`${config.outputDir}/test-design-${item.storyId ?? item.epicId ?? "feature"}.md\`.`,
+        `5. Do NOT use sprint-status.yaml — use issue_status tool for state management.`,
+        `6. After saving, mark this issue done using issue_status.`,
+        item.extraContext ? `\n## Additional Context\n${item.extraContext}` : "",
+      ].filter(Boolean).join("\n"),
     },
 
     "documentation": {
@@ -383,6 +437,23 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-tech-writer", "documentation (use bmad-document-project skill)"),
+    },
+
+    "generate-project-context": {
+      agentName: "bmad-tech-writer",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [issueStatusTool] as Tool<any>[],
+      buildPrompt: (item, config) => [
+        `@bmad-tech-writer Generate the project context file for this codebase.`,
+        ``,
+        `## Instructions`,
+        `1. Run the \`bmad-generate-project-context\` skill to produce \`${config.projectRoot}/project-context.md\`.`,
+        `2. Use defaults from \`${config.projectRoot}/_bmad/bmm/config.yaml\` — do NOT stop to ask questions.`,
+        `3. Analyze the codebase at \`${config.projectRoot}\` to extract architecture, conventions, and guidelines.`,
+        `4. Do NOT use sprint-status.yaml — use issue_status tool for state management.`,
+        `5. After saving \`project-context.md\`, mark this issue done using issue_status.`,
+        item.extraContext ? `\n## Additional Context\n${item.extraContext}` : "",
+      ].filter(Boolean).join("\n"),
     },
 
     "quick-dev": {
@@ -401,6 +472,56 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [issueStatusTool] as Tool<any>[],
       buildPrompt: contextPrompt("bmad-tech-writer", "editorial review (use bmad-editorial-review-prose and bmad-editorial-review-structure skills)"),
+    },
+
+    "epic-retrospective": {
+      agentName: "bmad-sm",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [issueStatusTool] as Tool<any>[],
+      buildPrompt: (item, config) => [
+        `@bmad-sm Conduct a post-epic retrospective for epic ${item.epicId ?? "the completed epic"}.`,
+        ``,
+        `## Epic: ${item.storyTitle ?? item.epicId ?? "Completed Epic"}`,
+        ``,
+        item.storyDescription ?? "",
+        ``,
+        `## Instructions`,
+        `1. Run the \`bmad-retrospective\` skill.`,
+        `2. **IMPORTANT — state tracking override:** Use the \`issue_status\` tool to look up`,
+        `   completed stories in this epic. Do NOT look for sprint-status.yaml — it does not`,
+        `   exist in this project. Use issue_status with action='read' and filter by epicId='${item.epicId ?? ""}' instead.`,
+        `3. The party mode protocol requires ALL dialogue in "Name (Role): dialogue" format.`,
+        `4. Save the retrospective report to \`${config.outputDir}/epic-${item.epicId ?? "latest"}-retrospective.md\`.`,
+        `5. After saving, mark this issue done using issue_status.`,
+        item.extraContext ? `\n## Additional Context\n${item.extraContext}` : "",
+      ].filter(Boolean).join("\n"),
+    },
+
+    "correct-course": {
+      agentName: "bmad-pm",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: [issueStatusTool] as Tool<any>[],
+      buildPrompt: (item, config) => [
+        `@bmad-pm A story has stalled and needs course correction.`,
+        ``,
+        `## Stalled Story: ${item.storyTitle ?? item.storyId ?? "Unknown"}`,
+        ``,
+        item.storyDescription ?? "",
+        ``,
+        `## Instructions`,
+        `1. Run the \`bmad-correct-course\` skill to analyze the blockage.`,
+        `2. **IMPORTANT — state tracking override:** Use the \`issue_status\` tool to read`,
+        `   current story state. Do NOT use sprint-status.yaml.`,
+        `3. Produce a sprint-change-proposal document covering:`,
+        `   - Root cause of the stall`,
+        `   - Impact on scope/timeline`,
+        `   - Proposed change with old→new format for affected stories`,
+        `   - Rationale for each change`,
+        `4. Save the proposal to \`${config.outputDir}/sprint-change-proposal-${new Date().toISOString().slice(0, 10)}.md\`.`,
+        `5. Post the proposal summary as a comment using issue_status with action='comment'.`,
+        `6. Mark this issue done using issue_status.`,
+        item.extraContext ? `\n## Additional Context\n${item.extraContext}` : "",
+      ].filter(Boolean).join("\n"),
     },
 
     // ═══════════════════════════════════════════════════════════════════
@@ -512,7 +633,26 @@ export class AgentDispatcher {
     }
 
     // Build the prompt
-    const prompt = phaseConfig.buildPrompt(item, this.config);
+    const basePrompt = phaseConfig.buildPrompt(item, this.config);
+
+    // Prepend workspace context block (B3) when available — agents learn what
+    // repo/branch they are operating on from PAPERCLIP_WORKSPACE_* env vars.
+    const workspaceBlock = this.config.workspaceContext
+      ? buildWorkspaceContext({
+          workspaceCwd: this.config.targetProjectRoot,
+          workspaceRepoUrl: this.config.workspaceContext.repoUrl,
+          workspaceBranch: this.config.workspaceContext.branch,
+          workspaceStrategy: this.config.workspaceContext.strategy,
+          workspaceWorktreePath: this.config.workspaceContext.worktreePath,
+        })
+      : buildWorkspaceContext({ workspaceCwd: this.config.targetProjectRoot });
+
+    // Append ticket-linking reminder so LLM-generated issue references use markdown links.
+    const ticketLinkReminder = `\n## Issue Referencing\nWhen referencing Paperclip issues, use markdown links: \`[PREFIX-N](/PREFIX/issues/PREFIX-N)\`. Never leave bare ticket IDs in comments or output.\n`;
+
+    const prompt = workspaceBlock
+      ? `${workspaceBlock}${basePrompt}${ticketLinkReminder}`
+      : `${basePrompt}${ticketLinkReminder}`;
 
     log.info("Dispatching work item", {
       phase: item.phase,

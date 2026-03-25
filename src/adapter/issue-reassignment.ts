@@ -11,6 +11,7 @@
 import type { PaperclipClient } from "./paperclip-client.js";
 import { resolveAgentId, clearAgentIdCache } from "./ceo-orchestrator.js";
 import { Logger } from "../observability/logger.js";
+import { linkifyTickets } from "../utils/comment-format.js";
 
 const log = Logger.child("issue-reassignment");
 
@@ -102,7 +103,7 @@ async function doReassign(
 
   // 4. Post handoff comment
   try {
-    await client.addIssueComment(issueId, handoffComment);
+    await client.addIssueComment(issueId, linkifyTickets(handoffComment));
   } catch (err) {
     // Non-fatal — the reassignment already happened
     log.warn("Failed to post handoff comment", {

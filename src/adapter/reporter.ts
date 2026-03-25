@@ -22,6 +22,7 @@ import type { SprintEvent } from "./sprint-runner.js";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Logger } from "../observability/logger.js";
+import { linkifyTickets } from "../utils/comment-format.js";
 
 const log = Logger.child("reporter");
 
@@ -257,7 +258,7 @@ export class PaperclipReporter {
     };
 
     try {
-      await this.client.addIssueComment(issueId, comment);
+      await this.client.addIssueComment(issueId, linkifyTickets(comment));
       entry.success = true;
       log.info("Posted issue comment", {
         agentId,

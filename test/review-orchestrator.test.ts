@@ -3,9 +3,13 @@
  *
  * Tests the finding parser (structured + heuristic formats)
  * and review history persistence logic.
+ * Also tests ReviewOrchestrator.run() P1-2 Paperclip transition requirements.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 // Mock the Copilot SDK to avoid import resolution errors
 vi.mock("@github/copilot-sdk", () => ({
@@ -14,7 +18,27 @@ vi.mock("@github/copilot-sdk", () => ({
   defineTool: vi.fn((_name: string, _opts: unknown) => ({ name: _name })),
 }));
 
-import { parseFindings } from "../src/quality-gates/review-orchestrator.js";
+vi.mock("../src/observability/logger.js", () => ({
+  Logger: { child: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }) },
+}));
+
+vi.mock("../src/observability/tracing.js", () => ({
+  traceQualityGate: vi.fn(
+    (_storyId: string, _pass: number, fn: (span: { setAttribute: (k: string, v: unknown) => void }) => unknown) =>
+      fn({ setAttribute: vi.fn() }),
+  ),
+}));
+
+vi.mock("../src/observability/metrics.js", () => ({
+  recordReviewPass: vi.fn(),
+  recordGateVerdict: vi.fn(),
+}));
+
+import { parseFindings, ReviewOrchestrator } from "../src/quality-gates/review-orchestrator.js";
+import { setToolContext, clearToolContext } from "../src/tools/tool-context.js";
+import type { PaperclipClient } from "../src/adapter/paperclip-client.js";
+import type { AgentDispatcher } from "../src/adapter/agent-dispatcher.js";
+import type { BmadConfig } from "../src/config/config.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // parseFindings — Structured Format
@@ -153,5 +177,91 @@ Also noted: LOW: src/style.ts - formatting issue`;
     // Should only return the structured finding (structured takes priority)
     expect(findings).toHaveLength(1);
     expect(findings[0].id).toBe("F-001");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ReviewOrchestrator.run() — P1-2: transitionStory throws without tool context
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("ReviewOrchestrator — P1-2: transitionStory requires Paperclip context", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "review-orchestrator-p1-"));
+    clearToolContext();
+  });
+
+  afterEach(async () => {
+    clearToolContext();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("run() rejects with an informative error when no tool context is set (PASS path triggers transitionStory)", async () => {
+    // Dispatcher always returns a clean PASS (no findings)
+    const dispatcher = {
+      dispatch: vi.fn().mockResolvedValue({
+        success: true,
+        response: "LGTM — no issues found.",
+        agentName: "code-reviewer",
+        sessionId: "session-1",
+      }),
+    } as unknown as AgentDispatcher;
+
+    const config = {
+      outputDir: tmpDir,
+      reviewPassLimit: 1,
+      agentRoles: {},
+    } as unknown as BmadConfig;
+
+    // No setToolContext() call — transitionStory must throw
+    const orchestrator = new ReviewOrchestrator(dispatcher, config);
+
+    await expect(
+      orchestrator.run({ storyId: "STORY-001", storyTitle: "Test story" }),
+    ).rejects.toThrow("transitionStory: no Paperclip tool context");
+  });
+
+  it("run() succeeds (PASS path) when Paperclip tool context is set", async () => {
+    const mockClient = {
+      getIssue: vi.fn().mockResolvedValue({
+        id: "issue-abc",
+        metadata: { storyId: "STORY-001" },
+        status: "review",
+      }),
+      updateIssue: vi.fn().mockResolvedValue({}),
+    } as unknown as PaperclipClient;
+
+    setToolContext({
+      paperclipClient: mockClient,
+      agentId: "agent-reviewer",
+      issueId: "issue-abc",
+      workspaceDir: tmpDir,
+      companyId: "co-1",
+    });
+
+    const dispatcher = {
+      dispatch: vi.fn().mockResolvedValue({
+        success: true,
+        response: "LGTM — no issues found.",
+        agentName: "code-reviewer",
+        sessionId: "session-1",
+      }),
+    } as unknown as AgentDispatcher;
+
+    const config = {
+      outputDir: tmpDir,
+      reviewPassLimit: 1,
+      agentRoles: {},
+    } as unknown as BmadConfig;
+
+    const orchestrator = new ReviewOrchestrator(dispatcher, config);
+    const result = await orchestrator.run({ storyId: "STORY-001", storyTitle: "Test story" });
+
+    expect(result.approved).toBe(true);
+    expect(mockClient.updateIssue).toHaveBeenCalledWith(
+      "issue-abc",
+      expect.objectContaining({ status: "done" }),
+    );
   });
 });

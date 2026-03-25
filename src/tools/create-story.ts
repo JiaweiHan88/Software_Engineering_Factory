@@ -164,7 +164,7 @@ export const createStoryTool = defineTool("create_story", {
             storyFilePath: storyRelativePath,
             epicId: args.epic_id,
             storySequence: args.story_sequence ?? 0,
-            workPhase: "dev-story",
+            workPhase: "create-story",
             reviewPasses: 0,
           },
         });

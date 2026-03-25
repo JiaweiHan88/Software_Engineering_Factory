@@ -14,7 +14,7 @@
 import { z } from "zod";
 import { defineTool } from "../tools/types.js";
 import { loadConfig } from "../config/index.js";
-import { readSprintStatus, writeSprintStatus } from "../tools/sprint-status.js";
+import { tryGetToolContext } from "../tools/tool-context.js";
 import { evaluateGate, formatGateReport } from "./engine.js";
 import { loadReviewHistory, saveReviewHistory } from "./review-orchestrator.js";
 import type { ReviewFinding, FindingCategory, Severity } from "./types.js";
@@ -80,21 +80,38 @@ export const qualityGateEvaluateTool = defineTool("quality_gate_evaluate", {
   }),
   handler: async (args) => {
     const config = loadConfig();
+    const ctx = tryGetToolContext();
 
-    // Validate story exists and is in review
-    const sprintData = await readSprintStatus(config.sprintStatusPath);
-    const story = sprintData.sprint.stories.find((s) => s.id === args.story_id);
+    // Validate story is in a reviewable state via Paperclip
+    if (ctx) {
+      try {
+        const issue = await ctx.paperclipClient.getIssue(ctx.issueId);
+        const meta = issue.metadata as Record<string, unknown> | undefined;
 
-    if (!story) {
+        // Warn if storyId in args doesn't match the checked-out issue
+        if (meta?.storyId && meta.storyId !== args.story_id) {
+          return {
+            textResultForLlm: `Error: story_id "${args.story_id}" does not match checked-out issue storyId "${meta.storyId}". Verify you are reviewing the correct story.`,
+            resultType: "failure" as const,
+          };
+        }
+
+        const actionableStatuses = new Set(["review", "in_progress", "in-progress", "todo"]);
+        if (!actionableStatuses.has(issue.status)) {
+          return {
+            textResultForLlm: `Error: Issue "${issue.title}" has status '${issue.status}'. Quality gate evaluation expects 'review' or 'in_progress' status.`,
+            resultType: "failure" as const,
+          };
+        }
+      } catch (err) {
+        return {
+          textResultForLlm: `Error: Failed to read issue from Paperclip: ${err instanceof Error ? err.message : String(err)}`,
+          resultType: "failure" as const,
+        };
+      }
+    } else {
       return {
-        textResultForLlm: `Error: Story ${args.story_id} not found in sprint-status.yaml.`,
-        resultType: "failure" as const,
-      };
-    }
-
-    if (story.status !== "review") {
-      return {
-        textResultForLlm: `Error: Story ${args.story_id} has status '${story.status}'. Quality gate evaluation requires status 'review'.`,
+        textResultForLlm: `Error: No Paperclip tool context available. quality_gate_evaluate requires a heartbeat context with an active issue checkout.`,
         resultType: "failure" as const,
       };
     }
@@ -133,23 +150,36 @@ export const qualityGateEvaluateTool = defineTool("quality_gate_evaluate", {
       completedAt: new Date().toISOString(),
     });
 
-    // Update story status based on verdict
-    if (gateResult.verdict === "PASS") {
-      story.status = "done";
-      story.assigned = undefined;
-      history.status = "approved";
-      history.finalVerdict = "PASS";
-    } else if (gateResult.verdict === "ESCALATE") {
-      history.status = "escalated";
-      history.finalVerdict = "ESCALATE";
-      history.escalationReason = gateResult.summary;
-    } else {
-      // FAIL — story stays in review, increment pass count
-      story.reviewPasses = passNumber;
+    // Update issue status via Paperclip based on verdict
+    try {
+      const currentMeta = ((await ctx.paperclipClient.getIssue(ctx.issueId)).metadata ?? {}) as Record<string, unknown>;
+      if (gateResult.verdict === "PASS") {
+        await ctx.paperclipClient.updateIssue(ctx.issueId, {
+          status: "done",
+          metadata: { ...currentMeta, reviewPasses: passNumber, lastReviewVerdict: "PASS" },
+        });
+        history.status = "approved";
+        history.finalVerdict = "PASS";
+      } else if (gateResult.verdict === "ESCALATE") {
+        history.status = "escalated";
+        history.finalVerdict = "ESCALATE";
+        history.escalationReason = gateResult.summary;
+        await ctx.paperclipClient.updateIssue(ctx.issueId, {
+          metadata: { ...currentMeta, reviewPasses: passNumber, lastReviewVerdict: "ESCALATE" },
+        });
+      } else {
+        // FAIL — increment pass count in metadata
+        await ctx.paperclipClient.updateIssue(ctx.issueId, {
+          metadata: { ...currentMeta, reviewPasses: passNumber, lastReviewVerdict: "FAIL" },
+        });
+      }
+    } catch (err) {
+      return {
+        textResultForLlm: `Error: Failed to update issue in Paperclip: ${err instanceof Error ? err.message : String(err)}`,
+        resultType: "failure" as const,
+      };
     }
 
-    // Persist changes
-    await writeSprintStatus(config.sprintStatusPath, sprintData);
     await saveReviewHistory(config, history);
 
     // Build response

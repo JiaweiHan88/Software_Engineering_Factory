@@ -27,7 +27,6 @@ import type {
 import { evaluateGate, decideNextAction, formatGateReport, formatReviewTimeline } from "./engine.js";
 import type { BmadConfig } from "../config/config.js";
 import type { AgentDispatcher, DispatchResult } from "../adapter/agent-dispatcher.js";
-import { readSprintStatus, writeSprintStatus } from "../tools/sprint-status.js";
 import { tryGetToolContext } from "../tools/tool-context.js";
 import { Logger } from "../observability/logger.js";
 import { traceQualityGate } from "../observability/tracing.js";
@@ -504,46 +503,40 @@ export class ReviewOrchestrator {
   }
 
   /**
-   * Transition a story's status.
+   * Transition a story's status via Paperclip issue update.
    *
-   * M2: Tries Paperclip issue update first (via tool context), then
-   * falls back to sprint-status.yaml for backward compatibility.
+   * Requires tool context (set by heartbeat-entrypoint.ts before dispatch).
+   * Throws if Paperclip context is unavailable — YAML fallback removed (P1-2).
    */
   private async transitionStory(
     storyId: string,
     newStatus: "done" | "review" | "in-progress",
   ): Promise<void> {
-    // M2: Try Paperclip issue update first
     const toolCtx = tryGetToolContext();
-    if (toolCtx) {
-      try {
-        const meta = (await toolCtx.paperclipClient.getIssue(toolCtx.issueId)).metadata as Record<string, unknown> | undefined;
-        await toolCtx.paperclipClient.updateIssue(toolCtx.issueId, {
-          status: newStatus,
-          metadata: {
-            ...meta,
-            lastReviewResult: newStatus === "done" ? "pass" : "pending",
-          },
-        });
-        log.info("Story transitioned via Paperclip", { storyId, newStatus, issueId: toolCtx.issueId });
-        return;
-      } catch (err) {
-        log.warn("Paperclip transition failed, falling back to YAML", {
-          storyId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
+    if (!toolCtx) {
+      throw new Error(
+        `transitionStory: no Paperclip tool context — cannot transition story ${storyId} to '${newStatus}'. ` +
+        `Ensure setToolContext() is called before the review orchestrator runs.`,
+      );
     }
 
-    // Fallback: sprint-status.yaml (deprecated)
-    const sprintData = await readSprintStatus(this.config.sprintStatusPath);
-    const story = sprintData.sprint.stories.find((s) => s.id === storyId);
-    if (story) {
-      story.status = newStatus;
-      if (newStatus === "done") {
-        story.assigned = undefined;
-      }
-      await writeSprintStatus(this.config.sprintStatusPath, sprintData);
+    try {
+      const meta = ((await toolCtx.paperclipClient.getIssue(toolCtx.issueId)).metadata ?? {}) as Record<string, unknown>;
+      await toolCtx.paperclipClient.updateIssue(toolCtx.issueId, {
+        status: newStatus,
+        metadata: {
+          ...meta,
+          lastReviewResult: newStatus === "done" ? "pass" : "pending",
+        },
+      });
+      log.info("Story transitioned via Paperclip", { storyId, newStatus, issueId: toolCtx.issueId });
+    } catch (err) {
+      log.error("Paperclip story transition failed", {
+        storyId,
+        newStatus,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
     }
   }
 }

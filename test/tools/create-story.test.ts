@@ -155,7 +155,7 @@ describe("create_story tool", () => {
         storyId: "STORY-010",
         epicId: "epic-2",
         storySequence: 3,
-        workPhase: "dev-story",
+        workPhase: "create-story",
         reviewPasses: 0,
       }),
     }));

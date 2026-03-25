@@ -20,7 +20,7 @@
  * - PAPERCLIP_URL — Paperclip server base URL
  * - PAPERCLIP_COMPANY_ID — Company ID for scoping
  * - PAPERCLIP_AGENT_ID — This agent's UUID
- * - PAPERCLIP_HEARTBEAT_RUN_ID — Current heartbeat run ID (for transcripts)
+ * - PAPERCLIP_RUN_ID — Current heartbeat run ID (for transcripts)
  * - PAPERCLIP_WORKSPACE_CWD — Resolved workspace directory (aa27db4 parity)
  *
  * Additional env (from .env or inherited):
@@ -151,7 +151,8 @@ interface PaperclipEnv {
  * standalone env vars (PAPERCLIP_URL, PAPERCLIP_AGENT_API_KEY) for flexibility.
  *
  * Phase A3: Also reads wake context env vars (PAPERCLIP_TASK_ID, WAKE_REASON, etc.)
- * Phase A5: Accepts both PAPERCLIP_RUN_ID and PAPERCLIP_HEARTBEAT_RUN_ID.
+ * Phase A5: Primary var is PAPERCLIP_RUN_ID (injected by process adapter).
+ * PAPERCLIP_HEARTBEAT_RUN_ID is kept as a deprecated fallback for local scripts.
  *
  * @throws Error if required env vars are missing
  */
@@ -171,7 +172,8 @@ function extractPaperclipEnv(): PaperclipEnv {
   const companyId = process.env.PAPERCLIP_COMPANY_ID;
   const agentId = process.env.PAPERCLIP_AGENT_ID;
 
-  // Phase A5: Accept both PAPERCLIP_RUN_ID and PAPERCLIP_HEARTBEAT_RUN_ID
+  // PAPERCLIP_RUN_ID is the canonical name injected by the process adapter.
+  // PAPERCLIP_HEARTBEAT_RUN_ID is a deprecated alias kept for local/test scripts.
   const heartbeatRunId =
     process.env.PAPERCLIP_RUN_ID ||
     process.env.PAPERCLIP_HEARTBEAT_RUN_ID ||

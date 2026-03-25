@@ -111,6 +111,17 @@ export interface BmadConfig {
    * Used as systemMessage in Copilot SDK session creation.
    */
   agentSystemMessage?: string;
+  /**
+   * Workspace context injected by the Paperclip process adapter at runtime.
+   * Populated from PAPERCLIP_WORKSPACE_REPO_URL, _BRANCH, _STRATEGY, _WORKTREE_PATH.
+   * Prepended to all agent dispatch prompts so agents know what repo they operate on.
+   */
+  workspaceContext?: {
+    repoUrl?: string;
+    branch?: string;
+    strategy?: string;
+    worktreePath?: string;
+  };
 }
 
 /**

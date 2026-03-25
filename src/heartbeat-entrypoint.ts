@@ -41,7 +41,7 @@ import { PaperclipReporter } from "./adapter/reporter.js";
 import { SessionManager } from "./adapter/session-manager.js";
 import { AgentDispatcher } from "./adapter/agent-dispatcher.js";
 import { handlePaperclipIssue } from "./adapter/heartbeat-handler.js";
-import { orchestrateCeoIssue, reEvaluateDelegation } from "./adapter/ceo-orchestrator.js";
+import { orchestrateCeoIssue, reEvaluateDelegation, handleApprovalDecision } from "./adapter/ceo-orchestrator.js";
 import { withRetry, isPaperclipRetryable } from "./adapter/retry.js";
 import { resolveRoleMapping, PAPERCLIP_SKILLS } from "./config/role-mapping.js";
 import type { RoleMappingEntry } from "./config/role-mapping.js";
@@ -632,30 +632,37 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // ── Step 5a: Approval follow-up (Phase A4) ─────────────────────────
-  // If this heartbeat was triggered for an approval, handle it and exit.
-  if (env.approvalId) {
+  // ── Step 5a: Approval follow-up (P2-7) ─────────────────────────────
+  // When woken by an approval decision, CEO agents handle it explicitly.
+  // Non-CEO agents just note it and continue — the approval context informs behavior.
+  if (env.approvalId && env.approvalStatus) {
     log.info("Handling approval wake", {
       approvalId: env.approvalId,
-      approvalStatus: env.approvalStatus ?? "unknown",
+      approvalStatus: env.approvalStatus,
     });
-    // Approval handling is a dedicated heartbeat — report result and exit.
-    // The approval is logged; the related task will be picked up on the next
-    // regular heartbeat via the inbox.
-    try {
-      if (env.taskId) {
-        await paperclipClient.addIssueComment(
-          env.taskId,
-          `🔔 **Approval received** — ID: \`${env.approvalId}\`, Status: **${env.approvalStatus ?? "unknown"}**`,
+    if (mapping.isOrchestrator && env.taskId) {
+      // CEO: fetch the triggering issue and run the approval decision handler
+      try {
+        const approvalIssue = await paperclipClient.getIssue(env.taskId);
+        await handleApprovalDecision(
+          env.approvalId,
+          env.approvalStatus,
+          approvalIssue,
+          paperclipClient,
         );
+      } catch (approvalErr) {
+        log.warn("Approval decision handling failed (non-fatal, continuing)", {
+          approvalId: env.approvalId,
+          error: approvalErr instanceof Error ? approvalErr.message : String(approvalErr),
+        });
       }
-    } catch (approvalErr) {
-      log.warn("Failed to post approval notification", {
-        error: approvalErr instanceof Error ? approvalErr.message : String(approvalErr),
+    } else if (env.taskId) {
+      // Non-CEO: log the approval context; agent sees it via task description
+      log.info("Approval wake for non-CEO agent — approval context will inform task", {
+        taskId: env.taskId,
+        approvalStatus: env.approvalStatus,
       });
     }
-    // Don't exit early — let the triggered task be processed below
-    // (the approval context will inform the agent's behavior)
   }
 
   // ── Step 5b: Prioritize triggered task (Phase A4) ──────────────────
@@ -765,6 +772,17 @@ async function main(): Promise<void> {
   config.paperclip.agentApiKey = env.agentApiKey;
   config.paperclip.companyId = env.companyId;
   config.paperclip.enabled = true;
+
+  // Inject workspace context from process adapter env vars into config
+  // so AgentDispatcher can prepend it to all dispatch prompts.
+  if (env.workspaceRepoUrl || env.workspaceBranch || env.workspaceStrategy || env.workspaceWorktreePath) {
+    config.workspaceContext = {
+      repoUrl: env.workspaceRepoUrl,
+      branch: env.workspaceBranch,
+      strategy: env.workspaceStrategy,
+      worktreePath: env.workspaceWorktreePath,
+    };
+  }
 
   // Inject agent 4-file system message into config for session creation
   if (agentSystemMessage) {

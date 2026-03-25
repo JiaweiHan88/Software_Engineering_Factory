@@ -94,6 +94,22 @@ export interface OrgNode {
   children: OrgNode[];
 }
 
+/** Paperclip approval — matches real `/api/approvals/:id` shape. */
+export interface PaperclipApproval {
+  id: string;
+  type: string;
+  status: "pending" | "approved" | "rejected" | "revision_requested";
+  /** Payload the requesting agent submitted when creating the approval. */
+  payload?: Record<string, unknown>;
+  requestedByAgentId?: string;
+  /** IDs of issues linked to this approval. */
+  issueIds?: string[];
+  decidedAt?: string;
+  decisionNote?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 /** Paperclip goal — matches real `/api/companies/:companyId/goals` shape. */
 export interface PaperclipGoal {
   id: string;
@@ -920,6 +936,30 @@ export class PaperclipClient {
     return this.request<DashboardSummary>(
       "GET",
       `/api/companies/${this.companyId}/dashboard`,
+    );
+  }
+
+  // ── Approvals ─────────────────────────────────────────────────────────
+
+  /**
+   * Get an approval by ID.
+   * Real endpoint: GET /api/approvals/:id
+   */
+  async getApproval(approvalId: string): Promise<PaperclipApproval> {
+    return this.request<PaperclipApproval>(
+      "GET",
+      `/api/approvals/${approvalId}`,
+    );
+  }
+
+  /**
+   * List issues linked to an approval.
+   * Real endpoint: GET /api/approvals/:id/issues
+   */
+  async getApprovalIssues(approvalId: string): Promise<PaperclipIssue[]> {
+    return this.request<PaperclipIssue[]>(
+      "GET",
+      `/api/approvals/${approvalId}/issues`,
     );
   }
 

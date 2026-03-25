@@ -26,8 +26,9 @@
  */
 
 import { PaperclipApiError } from "./paperclip-client.js";
-import type { PaperclipClient, PaperclipAgent, PaperclipIssue, IssueHeartbeatContext } from "./paperclip-client.js";
+import type { PaperclipClient, PaperclipAgent, PaperclipIssue, PaperclipApproval, IssueHeartbeatContext } from "./paperclip-client.js";
 import type { PaperclipReporter } from "./reporter.js";
+import { linkifyTickets } from "../utils/comment-format.js";
 import type { SessionManager } from "./session-manager.js";
 import type { BmadConfig } from "../config/config.js";
 import type { RoleMappingEntry } from "../config/role-mapping.js";
@@ -371,6 +372,18 @@ You are authorized to make ALL decisions autonomously EXCEPT:
 For everything else: DECIDE and PROCEED. Post your reasoning as a comment.
 Do NOT set requiresApproval to true unless one of the above conditions applies.
 
+## Handling Ambiguous Scope
+If the issue scope is genuinely ambiguous (conflicting requirements, unclear product direction,
+contradictory stakeholder inputs) and you cannot determine the correct course of action:
+1. Invoke the \`bmad-party-mode\` skill to synthesize perspectives from each BMAD agent role.
+2. Include the synthesized multi-agent analysis in your \`approvalReason\` before setting
+   \`requiresApproval: true\`.
+3. This is ONLY for genuine ambiguity — not for technical decisions you can make independently.
+
+## Issue Referencing
+When referencing Paperclip issues in comments, use markdown links: \`[PREFIX-N](/PREFIX/issues/PREFIX-N)\`.
+Never leave bare ticket IDs.
+
 ## Learnings
 If the system message contains "Learnings from Previous Epics", review them and apply relevant lessons to this delegation plan.
 For example: if past retros show schema changes need Architect review, include an Architect review step for stories that touch the schema.
@@ -631,7 +644,7 @@ export async function orchestrateCeoIssue(
   if (plan.requiresApproval) {
     await client.addIssueComment(
       issue.id,
-      [
+      linkifyTickets([
         `🛑 **CEO — Approval Required**`,
         ``,
         `**Analysis:** ${plan.analysis}`,
@@ -641,7 +654,7 @@ export async function orchestrateCeoIssue(
         ...plan.tasks.map((t, i) => `${i + 1}. **[${t.phase}]** ${t.title} → ${t.assignTo} (${t.priority})`),
         ``,
         `Please approve or modify this plan, then reassign to CEO.`,
-      ].join("\n"),
+      ].join("\n")),
     );
 
     return {
@@ -818,7 +831,7 @@ export async function orchestrateCeoIssue(
     `*I will re-evaluate when specialists complete their tasks and promote blocked issues as prerequisites are met.*`,
   );
 
-  await client.addIssueComment(issue.id, summaryLines.join("\n"));
+  await client.addIssueComment(issue.id, linkifyTickets(summaryLines.join("\n")));
 
   // Ensure parent issue is in_progress after delegation.
   // In board-access mode, Paperclip's checkout may not always transition
@@ -848,6 +861,102 @@ export async function orchestrateCeoIssue(
     subtasksCreated,
     plan,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Approval Decision Handler
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Handle an incoming approval decision from the Paperclip board.
+ *
+ * Called when the CEO heartbeat is woken with PAPERCLIP_APPROVAL_ID and
+ * PAPERCLIP_APPROVAL_STATUS set. Fetches the approval details, posts the
+ * outcome comment on the related issue, and either re-triggers delegation
+ * (approved) or parks the issue for human review (rejected/revision).
+ *
+ * @param approvalId - UUID of the approval to handle
+ * @param approvalStatus - "approved" | "rejected" | "revision_requested"
+ * @param issue - The issue the approval was requested from
+ * @param client - Paperclip API client
+ * @param approvalUrl - Optional URL helper for comment links
+ */
+export async function handleApprovalDecision(
+  approvalId: string,
+  approvalStatus: string,
+  issue: PaperclipIssue,
+  client: PaperclipClient,
+): Promise<void> {
+  log.info("Handling approval decision", { approvalId, approvalStatus, issueId: issue.id });
+
+  let approval: PaperclipApproval | undefined;
+  try {
+    approval = await client.getApproval(approvalId);
+  } catch (err) {
+    log.warn("Could not fetch approval details (non-fatal)", {
+      approvalId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  const decisionNote = approval?.decisionNote ?? "(no note provided)";
+
+  if (approvalStatus === "approved") {
+    // Post approval confirmation and queue for re-delegation
+    await client.addIssueComment(
+      issue.id,
+      linkifyTickets(
+        [
+          `✅ **CEO — Approval Granted**`,
+          ``,
+          `Approval \`${approvalId}\` was **approved** by the board.`,
+          approval?.decisionNote ? `**Board note:** ${decisionNote}` : "",
+          ``,
+          `Resuming delegation plan. Re-processing issue to proceed with approved work.`,
+        ].filter(Boolean).join("\n"),
+      ),
+    );
+
+    // Reset status to todo so the CEO is re-woken for normal delegation on next heartbeat
+    try {
+      await client.updateIssue(issue.id, { status: "todo" });
+      log.info("Issue reset to todo after approval", { issueId: issue.id });
+    } catch (updateErr) {
+      log.warn("Could not reset issue status after approval", {
+        issueId: issue.id,
+        error: updateErr instanceof Error ? updateErr.message : String(updateErr),
+      });
+    }
+  } else {
+    // Rejected or revision requested — park for human review
+    const emoji = approvalStatus === "rejected" ? "❌" : "🔁";
+    const label = approvalStatus === "rejected" ? "Rejected" : "Revision Requested";
+    await client.addIssueComment(
+      issue.id,
+      linkifyTickets(
+        [
+          `${emoji} **CEO — Approval ${label}**`,
+          ``,
+          `Approval \`${approvalId}\` was **${approvalStatus.replace("_", " ")}**.`,
+          `**Board note:** ${decisionNote}`,
+          ``,
+          `This issue is paused pending human clarification. Please review the board's note,`,
+          `update the issue description with revised scope, and reassign to CEO to restart.`,
+        ].join("\n"),
+      ),
+    );
+
+    // Set to blocked — awaiting human input
+    try {
+      await client.updateIssue(issue.id, { status: "blocked" });
+      log.info("Issue set to blocked after rejected approval", { issueId: issue.id });
+    } catch (updateErr) {
+      log.warn("Could not update issue status after rejected approval", {
+        issueId: issue.id,
+        error: updateErr instanceof Error ? updateErr.message : String(updateErr),
+      });
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1217,7 +1326,8 @@ export async function reEvaluateDelegation(
             title: `Epic ${epicId} Retrospective`,
             description:
               `All stories for epic ${epicId} are complete. ` +
-              `Run the bmad-retrospective skill. ` +
+              `Run the bmad-retrospective skill following the epic-retrospective dispatch phase. ` +
+              `Use issue_status tool (NOT sprint-status.yaml) to look up completed stories. ` +
               `Analyze: what worked, what didn't, review patterns, E2E coverage. ` +
               `Save the retrospective report as \`_bmad-output/epic-${epicId}-retrospective.md\`.`,
             status: "todo",
@@ -1225,7 +1335,7 @@ export async function reEvaluateDelegation(
             parentId: parentIssue.id,
             metadata: {
               bmadPhase: "review",
-              workPhase: "retrospective",
+              workPhase: "epic-retrospective",
               isRetrospective: true,
               epicId,
             },
@@ -1308,6 +1418,57 @@ export async function reEvaluateDelegation(
     } catch (err) {
       log.warn("Failed to extract learnings from retro", {
         epicId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // M3.5: Stall detection — create correct-course tasks for stuck in-progress issues
+  // Checks non-story, non-complete children that have been in_progress longer than
+  // the stall threshold (default 60 min). Creates a bmad-pm correct-course issue as
+  // a sibling so the PM can formally propose a sprint change.
+  const STALL_THRESHOLD_MS = 60 * 60 * 1_000; // 60 minutes
+  const stallNow = Date.now();
+  for (const child of nonStoryIssues) {
+    if (child.status !== "in_progress") continue;
+    const alreadyHasCorrectCourse = nonStoryIssues.some(
+      (c) =>
+        (c.metadata as Record<string, unknown> | undefined)?.correctCourseForIssueId === child.id,
+    );
+    if (alreadyHasCorrectCourse) continue;
+
+    const updatedAt = child.updatedAt ? new Date(child.updatedAt).getTime() : null;
+    const stalledMs = updatedAt !== null ? stallNow - updatedAt : null;
+    if (stalledMs === null || stalledMs < STALL_THRESHOLD_MS) continue;
+
+    const stalledMin = Math.round(stalledMs / 60_000);
+    const pmId = await resolveAgentId("bmad-pm", client);
+    try {
+      await client.createIssue({
+        title: `Course Correction: "${child.title?.slice(0, 60) ?? child.id}"`,
+        description:
+          `Issue \`${child.id}\` has been in-progress for ${stalledMin} minutes with no progress.\n\n` +
+          `## Original Task\n${child.description ?? "(no description)"}\n\n` +
+          `Run the bmad-correct-course skill to analyze the blockage and produce a sprint-change-proposal.\n` +
+          `Use issue_status tool (NOT sprint-status.yaml) to read the current state of this issue.\n` +
+          `Post the proposal as a comment and mark this issue done when complete.`,
+        status: "todo",
+        assigneeAgentId: pmId,
+        parentId: parentIssue.id,
+        metadata: {
+          bmadPhase: "review",
+          workPhase: "correct-course",
+          correctCourseForIssueId: child.id,
+          stalledMinutes: stalledMin,
+        },
+      });
+      log.info("Correct-course issue created for stalled task", {
+        stalledIssueId: child.id,
+        stalledMinutes: stalledMin,
+      });
+    } catch (err) {
+      log.warn("Failed to create correct-course issue", {
+        issueId: child.id,
         error: err instanceof Error ? err.message : String(err),
       });
     }

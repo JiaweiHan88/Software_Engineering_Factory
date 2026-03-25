@@ -46,7 +46,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     bmadSkills: [
       "bmad-help",
     ],
-    tools: ["sprint_status"],
+    tools: ["issue_status"],
   },
   // Alias: metadata.bmadRole = "bmad-ceo"
   "bmad-ceo": {
@@ -57,7 +57,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     bmadSkills: [
       "bmad-help",
     ],
-    tools: ["sprint_status"],
+    tools: ["issue_status"],
   },
 
   // ─── Product Manager ─────────────────────────────────────────────────
@@ -79,7 +79,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
       "bmad-correct-course",
       "bmad-party-mode",
     ],
-    tools: ["create_story", "sprint_status"],
+    tools: ["create_story", "issue_status"],
   },
 
   // ─── Architect ────────────────────────────────────────────────────────
@@ -93,7 +93,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
       "bmad-technical-research",
       "bmad-domain-research",
     ],
-    tools: ["sprint_status"],
+    tools: ["issue_status"],
   },
 
   // ─── Developer ────────────────────────────────────────────────────────
@@ -107,7 +107,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
       "bmad-quick-dev",
       "bmad-quick-spec",
     ],
-    tools: ["dev_story", "sprint_status"],
+    tools: ["issue_status"],
   },
 
   // ─── QA Engineer ──────────────────────────────────────────────────────
@@ -130,7 +130,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
       "bmad-testarch-test-review",
       "bmad-testarch-trace",
     ],
-    tools: ["code_review", "code_review_result", "quality_gate_evaluate", "sprint_status"],
+    tools: ["code_review", "code_review_result", "quality_gate_evaluate", "issue_status"],
   },
 
   // ─── Scrum Master ─────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
       "bmad-correct-course",
       "bmad-retrospective",
     ],
-    tools: ["sprint_status", "create_story"],
+    tools: ["issue_status", "create_story"],
   },
 
   // ─── Analyst ──────────────────────────────────────────────────────────
@@ -160,7 +160,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
       "bmad-domain-research",
       "bmad-advanced-elicitation",
     ],
-    tools: ["sprint_status"],
+    tools: ["issue_status"],
   },
 
   // ─── UX Designer ─────────────────────────────────────────────────────
@@ -172,7 +172,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
     bmadSkills: [
       "bmad-create-ux-design",
     ],
-    tools: ["sprint_status"],
+    tools: ["issue_status"],
   },
 
   // ─── Tech Writer ──────────────────────────────────────────────────────
@@ -190,7 +190,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
       "bmad-editorial-review-structure",
       "bmad-distillator",
     ],
-    tools: ["sprint_status"],
+    tools: ["issue_status"],
   },
 
   // ─── Quick-Flow Solo Dev ──────────────────────────────────────────────
@@ -206,7 +206,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
       "bmad-create-story",
       "bmad-code-review",
     ],
-    tools: ["dev_story", "create_story", "code_review", "sprint_status"],
+    tools: ["create_story", "code_review", "issue_status"],
   },
   // Alias: metadata.bmadRole = "bmad-quick-flow"
   "bmad-quick-flow": {
@@ -221,7 +221,7 @@ export const ROLE_MAPPING: Record<string, RoleMappingEntry> = {
       "bmad-create-story",
       "bmad-code-review",
     ],
-    tools: ["dev_story", "create_story", "code_review", "sprint_status"],
+    tools: ["create_story", "code_review", "issue_status"],
   },
 };
 

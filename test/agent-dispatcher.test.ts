@@ -33,7 +33,7 @@ vi.mock("../src/observability/metrics.js", () => ({
 }));
 
 import { AgentDispatcher } from "../src/adapter/agent-dispatcher.js";
-import type { WorkItem } from "../src/adapter/agent-dispatcher.js";
+import type { WorkItem, WorkPhase } from "../src/adapter/agent-dispatcher.js";
 import type { SessionManager } from "../src/adapter/session-manager.js";
 import type { BmadConfig } from "../src/config/config.js";
 import { CostTracker } from "../src/observability/cost-tracker.js";
@@ -520,6 +520,124 @@ describe("AgentDispatcher", () => {
       const result = await dispatcher.dispatch(item);
 
       expect(result.success).toBe(true);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // P0 — BMAD Skill References & Sprint-Status Override
+  // ─────────────────────────────────────────────────────────────────────────
+
+  describe("P0: BMAD skill-driven prompts", () => {
+    it("dev-story prompt references bmad-dev-story skill, not dev_story tool", async () => {
+      const item: WorkItem = { id: "p0-1", phase: "dev-story", storyId: "S-001" };
+      await dispatcher.dispatch(item);
+
+      const sendCall = (mockMgr.sendAndWait as ReturnType<typeof vi.fn>).mock.calls[0];
+      const prompt = sendCall[1] as string;
+      expect(prompt).toContain("bmad-dev-story");
+      expect(prompt).not.toContain("Use the dev_story tool");
+    });
+
+    it("dev-story prompt includes sprint-status.yaml override", async () => {
+      const item: WorkItem = { id: "p0-1b", phase: "dev-story", storyId: "S-001" };
+      await dispatcher.dispatch(item);
+
+      const sendCall = (mockMgr.sendAndWait as ReturnType<typeof vi.fn>).mock.calls[0];
+      const prompt = sendCall[1] as string;
+      expect(prompt).toContain("Do NOT use sprint-status.yaml");
+      expect(prompt).toContain("issue_status");
+    });
+
+    it("code-review prompt references bmad-code-review skill, not code_review tool", async () => {
+      const item: WorkItem = { id: "p0-2", phase: "code-review", storyId: "S-001" };
+      await dispatcher.dispatch(item);
+
+      const sendCall = (mockMgr.sendAndWait as ReturnType<typeof vi.fn>).mock.calls[0];
+      const prompt = sendCall[1] as string;
+      expect(prompt).toContain("bmad-code-review");
+      expect(prompt).not.toContain("Use the code_review tool to review");
+    });
+
+    it("create-story prompt references bmad-create-story skill", async () => {
+      const item: WorkItem = { id: "p0-3", phase: "create-story", storyId: "S-001", storyTitle: "Test" };
+      await dispatcher.dispatch(item);
+
+      const sendCall = (mockMgr.sendAndWait as ReturnType<typeof vi.fn>).mock.calls[0];
+      const prompt = sendCall[1] as string;
+      expect(prompt).toContain("bmad-create-story");
+      expect(prompt).not.toContain("Use the create_story tool to create a new story");
+    });
+
+    it("create-story prompt still instructs to use create_story tool for Paperclip registration", async () => {
+      const item: WorkItem = { id: "p0-3b", phase: "create-story", storyId: "S-001", storyTitle: "Test" };
+      await dispatcher.dispatch(item);
+
+      const sendCall = (mockMgr.sendAndWait as ReturnType<typeof vi.fn>).mock.calls[0];
+      const prompt = sendCall[1] as string;
+      expect(prompt).toContain("create_story tool");
+      expect(prompt).toContain("Paperclip");
+    });
+  });
+
+  describe("P0: context prompts reference specific BMAD skills", () => {
+    const skillPhases: Array<{ phase: WorkPhase; skill: string; agent: string }> = [
+      { phase: "create-prd", skill: "bmad-create-prd", agent: "bmad-pm" },
+      { phase: "create-architecture", skill: "bmad-create-architecture", agent: "bmad-architect" },
+      { phase: "create-ux-design", skill: "bmad-create-ux-design", agent: "bmad-ux-designer" },
+      { phase: "create-product-brief", skill: "bmad-create-product-brief", agent: "bmad-pm" },
+      { phase: "create-epics", skill: "bmad-create-epics-and-stories", agent: "bmad-pm" },
+      { phase: "check-implementation-readiness", skill: "bmad-check-implementation-readiness", agent: "bmad-pm" },
+      { phase: "research", skill: "bmad-domain-research", agent: "bmad-analyst" },
+      { phase: "domain-research", skill: "bmad-domain-research", agent: "bmad-analyst" },
+      { phase: "market-research", skill: "bmad-market-research", agent: "bmad-pm" },
+      { phase: "technical-research", skill: "bmad-technical-research", agent: "bmad-architect" },
+      { phase: "e2e-tests", skill: "bmad-qa-generate-e2e-tests", agent: "bmad-qa" },
+      { phase: "documentation", skill: "bmad-document-project", agent: "bmad-tech-writer" },
+      { phase: "editorial-review", skill: "bmad-editorial-review", agent: "bmad-tech-writer" },
+      { phase: "quick-dev", skill: "bmad-quick-dev", agent: "bmad-quick-flow-solo-dev" },
+    ];
+
+    for (const { phase, skill, agent } of skillPhases) {
+      it(`${phase} prompt references ${skill} skill`, async () => {
+        const item: WorkItem = { id: `p0-5-${phase}`, phase, storyTitle: `Test ${phase}` };
+        await dispatcher.dispatch(item);
+
+        const sendCall = (mockMgr.sendAndWait as ReturnType<typeof vi.fn>).mock.calls[0];
+        const prompt = sendCall[1] as string;
+        expect(prompt).toContain(skill);
+        expect(prompt).toContain(`@${agent}`);
+      });
+    }
+  });
+
+  describe("P0: sprint-status.yaml override in context prompts", () => {
+    it("context prompts include state management override", async () => {
+      const item: WorkItem = { id: "p0-4", phase: "create-prd", storyTitle: "Test PRD" };
+      await dispatcher.dispatch(item);
+
+      const sendCall = (mockMgr.sendAndWait as ReturnType<typeof vi.fn>).mock.calls[0];
+      const prompt = sendCall[1] as string;
+      expect(prompt).toContain("Do NOT use sprint-status.yaml");
+      expect(prompt).toContain("issue_status");
+    });
+  });
+
+  describe("P0: tool removal", () => {
+    it("dev-story phase tools do not include dev_story tool", async () => {
+      const item: WorkItem = { id: "p0-6", phase: "dev-story", storyId: "S-001" };
+      await dispatcher.dispatch(item);
+
+      const createCall = (mockMgr.createAgentSession as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const toolNames = createCall.tools.map((t: { name: string }) => t.name);
+      expect(toolNames).not.toContain("dev_story");
+      expect(toolNames).toContain("issue_status");
+    });
+
+    it("allTools does not include dev_story or sprint_status", async () => {
+      const { allTools } = await import("../src/tools/index.js");
+      const toolNames = allTools.map((t: { name: string }) => t.name);
+      expect(toolNames).not.toContain("dev_story");
+      expect(toolNames).not.toContain("sprint_status");
     });
   });
 });

@@ -16,7 +16,7 @@ import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { allAgents } from "../agents/registry.js";
 import { getAgent } from "../agents/registry.js";
-import { devStoryTool, sprintStatusTool } from "../tools/index.js";
+import { issueStatusTool } from "../tools/index.js";
 
 // ── KEY CHANGE: point at the clean target workspace ──────────────────────────
 const FACTORY_ROOT = process.cwd(); // where this script lives (for skills)
@@ -58,7 +58,7 @@ async function main() {
   }));
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const tools = [devStoryTool, sprintStatusTool] as any[];
+  const tools = [issueStatusTool] as any[];
 
   // Skills come from the factory, but working dir is the target
   const skillDirs = [
@@ -66,7 +66,7 @@ async function main() {
   ].filter((d) => existsSync(d));
 
   console.log(`📋 Agent: ${agent.displayName}`);
-  console.log(`🔧 Tools: ${tools.length} (dev_story, sprint_status)`);
+  console.log(`🔧 Tools: ${tools.length} (issue_status)`);
   console.log(`📚 Skill dirs: ${skillDirs.join(", ")}`);
   console.log(`📂 Working directory: ${TARGET_ROOT}`);
   console.log(`📎 Custom agents: ${customAgents.length}\n`);

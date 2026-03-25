@@ -17,7 +17,6 @@ import { getAgent, allAgents } from "../agents/registry.js";
 import {
   allTools,
   createStoryTool,
-  devStoryTool,
   codeReviewTool,
   codeReviewResultTool,
   issueStatusTool,
@@ -166,6 +165,11 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
       `includes: (1) what you produced, (2) key findings or decisions, (3) the exact filenames`,
       `of all artifacts you created or updated.`,
       ``,
+      `## State Management`,
+      ``,
+      `**IMPORTANT:** Do NOT use sprint-status.yaml for state tracking. Use the issue_status`,
+      `tool to read, update, and manage issue state via the Paperclip API.`,
+      ``,
       `Use your BMAD skills and tools to complete this task thoroughly.`,
       item.extraContext ? `\n## Additional Context\n${item.extraContext}` : "",
     ].filter(Boolean).join("\n");
@@ -180,13 +184,22 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [createStoryTool, issueStatusTool] as Tool<any>[],
       buildPrompt: (item, _config) => [
-        `@bmad-pm Use the create_story tool to create a new story:`,
-        `- epic_id: "${item.epicId ?? "epic-1"}"`,
-        `- story_id: "${item.storyId ?? "STORY-NEW"}"`,
-        `- story_title: "${item.storyTitle ?? "Untitled Story"}"`,
-        `- story_description: "${item.storyDescription ?? "No description provided."}"`,
+        `@bmad-pm Create a detailed story following the bmad-create-story skill methodology.`,
         ``,
-        `After creating the story, confirm the Paperclip issue was created.`,
+        `## Story Details`,
+        `- Epic ID: "${item.epicId ?? "epic-1"}"`,
+        `- Story ID: "${item.storyId ?? "STORY-NEW"}"`,
+        `- Title: "${item.storyTitle ?? "Untitled Story"}"`,
+        `- Description: "${item.storyDescription ?? "No description provided."}"`,
+        ``,
+        `## Instructions`,
+        `1. Follow the bmad-create-story skill for deep artifact analysis (PRD, architecture,`,
+        `   UX specs, previous story learnings) to produce comprehensive story content.`,
+        `2. After generating rich story content, use the create_story tool to register the`,
+        `   story in Paperclip with the generated content.`,
+        `3. Do NOT use sprint-status.yaml — use issue_status tool for state management.`,
+        ``,
+        `Confirm the Paperclip issue was created after completion.`,
         item.extraContext ? `\nAdditional context:\n${item.extraContext}` : "",
       ].filter(Boolean).join("\n"),
     },
@@ -194,17 +207,26 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
     "dev-story": {
       agentName: "bmad-dev",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [devStoryTool, issueStatusTool] as Tool<any>[],
+      tools: [issueStatusTool] as Tool<any>[],
       buildPrompt: (item, config) => {
         const storyPath = resolve(config.outputDir, "stories", `${item.storyId}.md`);
         return [
-          `@bmad-dev Use the dev_story tool to implement story ${item.storyId}:`,
-          `- story_id: "${item.storyId}"`,
-          `- story_file_path: "${storyPath}"`,
+          `@bmad-dev Implement story ${item.storyId} following the bmad-dev-story skill methodology.`,
           ``,
-          `Read the story file for acceptance criteria and implement accordingly.`,
-          `When implementation is complete, use issue_status tool with action='reassign'`,
-          `and target_role='bmad-qa' to hand off for code review.`,
+          `## Story`,
+          `- Story ID: "${item.storyId}"`,
+          `- Story file: "${storyPath}"`,
+          ``,
+          `## Instructions`,
+          `1. Read the story file at the path above for acceptance criteria and tasks.`,
+          `2. Follow the bmad-dev-story skill's 10-step TDD workflow:`,
+          `   load context → detect review continuation → red-green-refactor cycle per task`,
+          `   → validate per task → mark for review.`,
+          `3. Do NOT use sprint-status.yaml — use issue_status tool for state management.`,
+          `4. When implementation is complete, use issue_status tool with action='reassign'`,
+          `   and target_role='bmad-qa' to hand off for code review.`,
+          ``,
+          `BMAD rule: dev-story runs exactly ONCE per story.`,
           item.extraContext ? `\nAdditional context:\n${item.extraContext}` : "",
         ].filter(Boolean).join("\n");
       },
@@ -217,19 +239,25 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
       buildPrompt: (item, config) => {
         const storyPath = resolve(config.outputDir, "stories", `${item.storyId}.md`);
         return [
-          `@bmad-qa Use the code_review tool to review story ${item.storyId}:`,
-          `- story_id: "${item.storyId}"`,
-          `- story_file_path: "${storyPath}"`,
-          `- files_to_review: "src/"`,
+          `@bmad-qa Review story ${item.storyId} following the bmad-code-review skill methodology.`,
           ``,
-          `Perform an adversarial code review following BMAD quality gates:`,
-          `- LOW/MEDIUM findings: log but don't block`,
-          `- HIGH/CRITICAL findings: BLOCK and require fixes`,
+          `## Story`,
+          `- Story ID: "${item.storyId}"`,
+          `- Story file: "${storyPath}"`,
+          `- Files to review: "src/"`,
           ``,
-          `After review, use code_review_result to record your verdict.`,
-          `If approved, the issue status will be updated to 'done' automatically.`,
-          `If rejected, use issue_status tool with action='reassign' and target_role='bmad-dev'`,
-          `to send back for fixes.`,
+          `## Instructions`,
+          `1. Follow the bmad-code-review skill's adversarial review process with parallel`,
+          `   review layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor).`,
+          `2. Apply BMAD quality gates:`,
+          `   - LOW/MEDIUM findings: log but don't block`,
+          `   - HIGH/CRITICAL findings: BLOCK and require fixes`,
+          `3. Use the code_review tool to track review passes in Paperclip metadata.`,
+          `4. After review, use code_review_result to record your verdict.`,
+          `5. If approved, the issue status will be updated to 'done' automatically.`,
+          `6. If rejected, use issue_status tool with action='reassign' and target_role='bmad-dev'`,
+          `   to send back for fixes.`,
+          `7. Do NOT use sprint-status.yaml — use issue_status tool for state management.`,
           item.extraContext ? `\nAdditional context:\n${item.extraContext}` : "",
         ].filter(Boolean).join("\n");
       },
@@ -265,28 +293,28 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
       agentName: "bmad-analyst",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [issueStatusTool] as Tool<any>[],
-      buildPrompt: contextPrompt("bmad-analyst", "research"),
+      buildPrompt: contextPrompt("bmad-analyst", "research (use bmad-domain-research or bmad-market-research skill)"),
     },
 
     "domain-research": {
       agentName: "bmad-analyst",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [issueStatusTool] as Tool<any>[],
-      buildPrompt: contextPrompt("bmad-analyst", "domain research"),
+      buildPrompt: contextPrompt("bmad-analyst", "domain research (use bmad-domain-research skill)"),
     },
 
     "market-research": {
       agentName: "bmad-pm",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [issueStatusTool] as Tool<any>[],
-      buildPrompt: contextPrompt("bmad-pm", "market research"),
+      buildPrompt: contextPrompt("bmad-pm", "market research (use bmad-market-research skill)"),
     },
 
     "technical-research": {
       agentName: "bmad-architect",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [issueStatusTool] as Tool<any>[],
-      buildPrompt: contextPrompt("bmad-architect", "technical research"),
+      buildPrompt: contextPrompt("bmad-architect", "technical research (use bmad-technical-research skill)"),
     },
 
     // ═══════════════════════════════════════════════════════════════════
@@ -297,28 +325,28 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
       agentName: "bmad-pm",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [issueStatusTool] as Tool<any>[],
-      buildPrompt: contextPrompt("bmad-pm", "PRD creation"),
+      buildPrompt: contextPrompt("bmad-pm", "PRD creation (use bmad-create-prd skill)"),
     },
 
     "create-architecture": {
       agentName: "bmad-architect",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [issueStatusTool] as Tool<any>[],
-      buildPrompt: contextPrompt("bmad-architect", "architecture design"),
+      buildPrompt: contextPrompt("bmad-architect", "architecture design (use bmad-create-architecture skill)"),
     },
 
     "create-ux-design": {
       agentName: "bmad-ux-designer",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [issueStatusTool] as Tool<any>[],
-      buildPrompt: contextPrompt("bmad-ux-designer", "UX design"),
+      buildPrompt: contextPrompt("bmad-ux-designer", "UX design (use bmad-create-ux-design skill)"),
     },
 
     "create-product-brief": {
       agentName: "bmad-pm",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [issueStatusTool] as Tool<any>[],
-      buildPrompt: contextPrompt("bmad-pm", "product brief creation"),
+      buildPrompt: contextPrompt("bmad-pm", "product brief creation (use bmad-create-product-brief skill)"),
     },
 
     // ═══════════════════════════════════════════════════════════════════
@@ -329,14 +357,14 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
       agentName: "bmad-pm",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [createStoryTool, issueStatusTool] as Tool<any>[],
-      buildPrompt: contextPrompt("bmad-pm", "epic and story creation"),
+      buildPrompt: contextPrompt("bmad-pm", "epic and story creation (use bmad-create-epics-and-stories skill)"),
     },
 
     "check-implementation-readiness": {
       agentName: "bmad-pm",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [issueStatusTool] as Tool<any>[],
-      buildPrompt: contextPrompt("bmad-pm", "implementation readiness check"),
+      buildPrompt: contextPrompt("bmad-pm", "implementation readiness check (use bmad-check-implementation-readiness skill)"),
     },
 
     // ═══════════════════════════════════════════════════════════════════
@@ -347,21 +375,21 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
       agentName: "bmad-qa",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [codeReviewTool, qualityGateEvaluateTool, issueStatusTool] as Tool<any>[],
-      buildPrompt: contextPrompt("bmad-qa", "end-to-end test generation"),
+      buildPrompt: contextPrompt("bmad-qa", "end-to-end test generation (use bmad-qa-generate-e2e-tests skill)"),
     },
 
     "documentation": {
       agentName: "bmad-tech-writer",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [issueStatusTool] as Tool<any>[],
-      buildPrompt: contextPrompt("bmad-tech-writer", "documentation"),
+      buildPrompt: contextPrompt("bmad-tech-writer", "documentation (use bmad-document-project skill)"),
     },
 
     "quick-dev": {
       agentName: "bmad-quick-flow-solo-dev",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [devStoryTool, createStoryTool, codeReviewTool, issueStatusTool] as Tool<any>[],
-      buildPrompt: contextPrompt("bmad-quick-flow-solo-dev", "quick development"),
+      tools: [createStoryTool, codeReviewTool, issueStatusTool] as Tool<any>[],
+      buildPrompt: contextPrompt("bmad-quick-flow-solo-dev", "quick development (use bmad-quick-dev skill)"),
     },
 
     // ═══════════════════════════════════════════════════════════════════
@@ -372,7 +400,7 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
       agentName: "bmad-tech-writer",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: [issueStatusTool] as Tool<any>[],
-      buildPrompt: contextPrompt("bmad-tech-writer", "editorial review"),
+      buildPrompt: contextPrompt("bmad-tech-writer", "editorial review (use bmad-editorial-review-prose and bmad-editorial-review-structure skills)"),
     },
 
     // ═══════════════════════════════════════════════════════════════════

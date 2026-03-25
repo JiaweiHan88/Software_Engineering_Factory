@@ -56,7 +56,6 @@ export interface HealthCheckResult {
 /** Expected tool names that must be registered for the system to be healthy */
 const REQUIRED_TOOL_NAMES = [
   "create_story",
-  "dev_story",
   "code_review",
   "code_review_result",
   "issue_status",

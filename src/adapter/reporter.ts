@@ -1,15 +1,15 @@
 /**
  * Paperclip Reporter — Structured Status Reporting via Issue Comments
  *
+ * COMMENT-ONLY reporter. Does NOT mutate issue state (status, assignee, workPhase).
+ * All state transitions are handled exclusively by lifecycle.ts.
+ *
  * Aligned with real Paperclip API:
- * - No /reports endpoint (was invented)
  * - Results flow back through issue comments: POST /api/issues/:id/comments
- * - Issue status updates via: PATCH /api/issues/:id
  *
  * Responsibilities:
  * - Map BMAD lifecycle events → Paperclip issue comments
- * - Map agent results → issue status updates
- * - Buffer and batch minor updates to reduce API traffic
+ * - Scan workspace artifacts and post summaries
  * - Log all reports locally for audit trail
  *
  * @module adapter/reporter
@@ -95,22 +95,14 @@ export class PaperclipReporter {
     const comment = `${statusEmoji[result.status]} **${result.status.toUpperCase()}** — ${result.message}`;
     await this.postIssueComment(agentId, issueId, result.status, comment);
 
-    // Also update the issue status in Paperclip if completed or blocked
-    if (result.status === "completed") {
-      // On completion, scan workspace for artifacts and append to comment
-      if (this.workspaceDir) {
-        const artifactInfo = this.scanWorkspaceArtifacts();
-        if (artifactInfo) {
-          await this.postIssueComment(agentId, issueId, "artifacts", artifactInfo);
-        }
+    // On completion, scan workspace for artifacts and append to comment.
+    // NOTE: Status transitions (done, blocked, reassignment) are handled
+    // exclusively by lifecycle.ts — the reporter is comment-only.
+    if (result.status === "completed" && this.workspaceDir) {
+      const artifactInfo = this.scanWorkspaceArtifacts();
+      if (artifactInfo) {
+        await this.postIssueComment(agentId, issueId, "artifacts", artifactInfo);
       }
-      await this.updateIssueStatus(issueId, "done");
-
-      // Wake the CEO (parent assignee) so it can re-evaluate dependencies
-      // and promote the next wave of backlog tasks to "todo".
-      await this.wakeParentAssignee(issueId);
-    } else if (result.status === "needs-human") {
-      await this.updateIssueStatus(issueId, "blocked");
     }
   }
 
@@ -275,62 +267,6 @@ export class PaperclipReporter {
     }
 
     this.addToHistory(entry);
-  }
-
-  /**
-   * Update an issue's status in Paperclip. Silently logs failures.
-   *
-   * Uses PATCH /api/issues/:id (real endpoint).
-   */
-  private async updateIssueStatus(
-    issueId: string,
-    status: string,
-  ): Promise<void> {
-    try {
-      await this.client.updateIssue(issueId, { status });
-      log.info("Issue status updated", { issueId, status });
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      log.error("Failed to update issue", { issueId, status, error: errorMsg });
-    }
-  }
-
-  /**
-   * Signal completion to the parent issue's assignee so it can re-evaluate
-   * dependencies and promote the next wave of backlog tasks.
-   *
-   * Strategy: post a brief completion comment on the **parent** issue.
-   * Paperclip auto-wakes the parent's assignee when a child issue moves
-   * to "done" (child_issue_done trigger), so the comment is purely
-   * informational for the audit trail. The actual wake is server-side.
-   *
-   * Silently logs and returns on any failure — notification is best-effort.
-   */
-  private async wakeParentAssignee(issueId: string): Promise<void> {
-    try {
-      const issue = await this.client.getIssue(issueId);
-      if (!issue.parentId) {
-        return; // Not a sub-issue — nothing to notify
-      }
-
-      // Post a brief completion notice on the parent issue for audit trail.
-      // Paperclip's child_issue_done trigger handles the actual agent wake.
-      const identifier = issue.identifier ?? issue.id.slice(0, 8);
-      await this.client.addIssueComment(
-        issue.parentId,
-        `📋 Sub-task **${identifier}** ("${issue.title.slice(0, 60)}") completed.`,
-      );
-      log.info("Posted completion notice on parent issue", {
-        issueId,
-        parentId: issue.parentId,
-      });
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      log.warn("Failed to notify parent issue (non-fatal)", {
-        issueId,
-        error: errorMsg,
-      });
-    }
   }
 
   // ── History Management ────────────────────────────────────────────────

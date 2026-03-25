@@ -17,6 +17,7 @@ import { loadConfig } from "../config/index.js";
 import { tryGetToolContext } from "../tools/tool-context.js";
 import { evaluateGate, formatGateReport } from "./engine.js";
 import { loadReviewHistory, saveReviewHistory } from "./review-orchestrator.js";
+import { passReview, escalateReview } from "../adapter/lifecycle.js";
 import type { ReviewFinding, FindingCategory, Severity } from "./types.js";
 
 /**
@@ -150,13 +151,12 @@ export const qualityGateEvaluateTool = defineTool("quality_gate_evaluate", {
       completedAt: new Date().toISOString(),
     });
 
-    // Update issue status via Paperclip based on verdict
+    // Update issue status via lifecycle based on verdict
     try {
-      const currentMeta = ((await ctx.paperclipClient.getIssue(ctx.issueId)).metadata ?? {}) as Record<string, unknown>;
       if (gateResult.verdict === "PASS") {
-        await ctx.paperclipClient.updateIssue(ctx.issueId, {
-          status: "done",
-          metadata: { ...currentMeta, reviewPasses: passNumber, lastReviewVerdict: "PASS" },
+        await passReview(ctx.paperclipClient, ctx.issueId, {
+          reviewPasses: passNumber,
+          lastReviewVerdict: "PASS",
         });
         history.status = "approved";
         history.finalVerdict = "PASS";
@@ -164,11 +164,13 @@ export const qualityGateEvaluateTool = defineTool("quality_gate_evaluate", {
         history.status = "escalated";
         history.finalVerdict = "ESCALATE";
         history.escalationReason = gateResult.summary;
-        await ctx.paperclipClient.updateIssue(ctx.issueId, {
-          metadata: { ...currentMeta, reviewPasses: passNumber, lastReviewVerdict: "ESCALATE" },
+        await escalateReview(ctx.paperclipClient, ctx.issueId, gateResult.summary, undefined, {
+          reviewPasses: passNumber,
+          lastReviewVerdict: "ESCALATE",
         });
       } else {
-        // FAIL — increment pass count in metadata
+        // FAIL — metadata-only update (not a lifecycle transition)
+        const currentMeta = ((await ctx.paperclipClient.getIssue(ctx.issueId)).metadata ?? {}) as Record<string, unknown>;
         await ctx.paperclipClient.updateIssue(ctx.issueId, {
           metadata: { ...currentMeta, reviewPasses: passNumber, lastReviewVerdict: "FAIL" },
         });

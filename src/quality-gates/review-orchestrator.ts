@@ -27,6 +27,7 @@ import type {
 import { evaluateGate, decideNextAction, formatGateReport, formatReviewTimeline } from "./engine.js";
 import type { BmadConfig } from "../config/config.js";
 import type { AgentDispatcher, DispatchResult } from "../adapter/agent-dispatcher.js";
+import { passReview } from "../adapter/lifecycle.js";
 import { tryGetToolContext } from "../tools/tool-context.js";
 import { Logger } from "../observability/logger.js";
 import { traceQualityGate } from "../observability/tracing.js";
@@ -503,10 +504,13 @@ export class ReviewOrchestrator {
   }
 
   /**
-   * Transition a story's status via Paperclip issue update.
+   * Transition a story's status via lifecycle or Paperclip issue update.
+   *
+   * For "done" transitions, delegates to lifecycle.passReview() (central engine).
+   * For review-internal states ("review", "in-progress"), updates directly.
    *
    * Requires tool context (set by heartbeat-entrypoint.ts before dispatch).
-   * Throws if Paperclip context is unavailable — YAML fallback removed (P1-2).
+   * Throws if Paperclip context is unavailable.
    */
   private async transitionStory(
     storyId: string,
@@ -520,13 +524,21 @@ export class ReviewOrchestrator {
       );
     }
 
+    if (newStatus === "done") {
+      // Lifecycle handles: status → done + wake parent
+      await passReview(toolCtx.paperclipClient, toolCtx.issueId);
+      log.info("Story transitioned via lifecycle", { storyId, newStatus, issueId: toolCtx.issueId });
+      return;
+    }
+
+    // Review-internal states — direct update (not a lifecycle transition)
     try {
       const meta = ((await toolCtx.paperclipClient.getIssue(toolCtx.issueId)).metadata ?? {}) as Record<string, unknown>;
       await toolCtx.paperclipClient.updateIssue(toolCtx.issueId, {
         status: newStatus,
         metadata: {
           ...meta,
-          lastReviewResult: newStatus === "done" ? "pass" : "pending",
+          lastReviewResult: "pending",
         },
       });
       log.info("Story transitioned via Paperclip", { storyId, newStatus, issueId: toolCtx.issueId });

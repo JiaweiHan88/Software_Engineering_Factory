@@ -23,6 +23,7 @@ import { z } from "zod";
 import { defineTool } from "./types.js";
 import { tryGetToolContext } from "./tool-context.js";
 import { loadConfig } from "../config/index.js";
+import { passReview, escalateReview } from "../adapter/lifecycle.js";
 
 /**
  * Copilot SDK tool: code_review
@@ -200,14 +201,10 @@ export const codeReviewResultTool = defineTool("code_review_result", {
         passesUsed = typeof meta?.reviewPasses === "number" ? meta.reviewPasses : 0;
 
         if (args.approved) {
-          // Update issue metadata with approval
-          await ctx.paperclipClient.updateIssue(ctx.issueId, {
-            status: "done",
-            metadata: {
-              ...meta,
-              lastReviewResult: "pass",
-              lastReviewFindings: args.findings_summary.slice(0, 500),
-            },
+          // Lifecycle handles: status → done + wake parent
+          await passReview(ctx.paperclipClient, ctx.issueId, {
+            reviewPasses: passesUsed,
+            lastReviewFindings: args.findings_summary.slice(0, 500),
           });
 
           return {
@@ -222,26 +219,21 @@ export const codeReviewResultTool = defineTool("code_review_result", {
 
         // Not approved — check pass limit
         if (passesUsed >= config.reviewPassLimit) {
-          // Escalate to CEO via parent issue comment
+          // Lifecycle handles: escalation metadata + parent notification
           const parentId = meta?.parentIssueId as string | undefined;
-          if (parentId) {
-            await ctx.paperclipClient.addIssueComment(
-              parentId,
-              `⚠️ **ESCALATION**: Story "${issue.title}" (${storyId}) REJECTED after ${passesUsed} review passes.\n` +
-              `HIGH/CRITICAL findings: ${args.high_critical_count}\n` +
-              `Summary: ${args.findings_summary}\n` +
-              `CEO action needed: force-approve, reassign, or investigate.`,
-            );
-          }
-
-          // Update metadata
-          await ctx.paperclipClient.updateIssue(ctx.issueId, {
-            metadata: {
-              ...meta,
-              lastReviewResult: "escalated",
+          await escalateReview(
+            ctx.paperclipClient,
+            ctx.issueId,
+            `⚠️ **ESCALATION**: Story "${issue.title}" (${storyId}) REJECTED after ${passesUsed} review passes.\n` +
+            `HIGH/CRITICAL findings: ${args.high_critical_count}\n` +
+            `Summary: ${args.findings_summary}\n` +
+            `CEO action needed: force-approve, reassign, or investigate.`,
+            parentId,
+            {
+              reviewPasses: passesUsed,
               lastReviewFindings: args.findings_summary.slice(0, 500),
             },
-          });
+          );
 
           return {
             textResultForLlm: [

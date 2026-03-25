@@ -28,6 +28,7 @@
 import { PaperclipApiError } from "./paperclip-client.js";
 import type { PaperclipClient, PaperclipAgent, PaperclipIssue, PaperclipApproval, IssueHeartbeatContext } from "./paperclip-client.js";
 import type { PaperclipReporter } from "./reporter.js";
+import { PHASE_TO_ROLE, promoteToTodo, closeParent } from "./lifecycle.js";
 import { linkifyTickets } from "../utils/comment-format.js";
 import type { SessionManager } from "./session-manager.js";
 import type { BmadConfig } from "../config/config.js";
@@ -1148,11 +1149,7 @@ export async function reEvaluateDelegation(
   const allDone = activeChildren.every((c) => c.status === "done");
   if (allDone) {
     log.info("All children done — closing parent issue");
-    await client.updateIssue(parentIssue.id, { status: "done" });
-    await client.addIssueComment(
-      parentIssue.id,
-      `✅ **CEO — All sub-tasks complete.** Closing parent issue.`,
-    );
+    await closeParent(client, parentIssue.id, `✅ **CEO — All sub-tasks complete.** Closing parent issue.`);
     return { success: true, promoted: 0, allDone: true };
   }
 
@@ -1264,32 +1261,21 @@ export async function reEvaluateDelegation(
         const existingWorkPhase = meta?.workPhase as string | undefined;
         const targetWorkPhase = existingWorkPhase || "create-story";
 
-        // Resolve the correct agent based on the target workPhase.
-        // Each phase maps to a specific BMAD agent role.
-        const PHASE_AGENT_MAP: Record<string, string> = {
-          "create-story": "bmad-sm",
-          "dev-story": "bmad-dev",
-          "code-review": "bmad-qa",
-          "sprint-planning": "bmad-sm",
-        };
-        const agentRole = PHASE_AGENT_MAP[targetWorkPhase] ?? "bmad-dev";
-        const assigneeId = await resolveAgentId(agentRole, client);
-
         log.info("Sequential story promoting", {
           issueId: firstNonDone.id.slice(0, 8),
-          assigneeId: assigneeId?.slice(0, 8),
-          agentRole,
           workPhase: targetWorkPhase,
           preservedExisting: !!existingWorkPhase,
         });
-        await client.updateIssue(firstNonDone.id, {
-          status: "todo",
-          ...(assigneeId ? { assigneeAgentId: assigneeId } : {}),
-          metadata: {
-            ...(firstNonDone.metadata as Record<string, unknown> | undefined),
-            workPhase: targetWorkPhase,
-          },
-        });
+
+        // Lifecycle handles: status → todo + correct assignee + workPhase
+        await promoteToTodo(
+          client,
+          firstNonDone.id,
+          firstNonDone.metadata as Record<string, unknown> | undefined,
+          targetWorkPhase,
+          resolveAgentId,
+        );
+
         promoted++;
         log.info("Sequential story promotion", {
           issueId: firstNonDone.id,

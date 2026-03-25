@@ -20,7 +20,7 @@ import type { AgentDispatcher, WorkPhase } from "./agent-dispatcher.js";
 import type { PaperclipIssue, IssueHeartbeatContext } from "./paperclip-client.js";
 import type { PaperclipReporter } from "./reporter.js";
 import type { ReviewOrchestrator } from "../quality-gates/review-orchestrator.js";
-import { reassignIssue } from "./issue-reassignment.js";
+import { completePhase, passReview, failReview, escalateReview } from "./lifecycle.js";
 import { tryGetToolContext } from "../tools/tool-context.js";
 import { Logger } from "../observability/logger.js";
 
@@ -111,36 +111,16 @@ export async function handleHeartbeat(
     };
   }
 
-  // 5. M1: Auto-reassign after successful dispatch based on completed phase
+  // 5. Lifecycle transition — let lifecycle.ts decide: reassign or done.
   const toolCtx = tryGetToolContext();
   if (toolCtx) {
     try {
-      if (phase === "create-story") {
-        // SM finished creating detailed story → reassign to Dev
-        await reassignIssue(
-          toolCtx.paperclipClient,
-          ctx.issue.id,
-          "bmad-dev",
-          `📋 Story detail created. Ready for implementation.`,
-          { workPhase: "dev-story" },
-        );
-      } else if (phase === "dev-story") {
-        // Dev finished implementing → reassign to QA
-        await reassignIssue(
-          toolCtx.paperclipClient,
-          ctx.issue.id,
-          "bmad-qa",
-          `💻 Implementation complete. Ready for code review.`,
-          { workPhase: "code-review" },
-        );
-      }
-      // code-review reassignment handled by ReviewOrchestrator (M2)
-      // or by the code_review_result tool handler
-    } catch (reassignErr) {
-      log.warn("Auto-reassignment failed (non-fatal)", {
+      await completePhase(toolCtx.paperclipClient, ctx.issue.id, phase);
+    } catch (transitionErr) {
+      log.warn("Lifecycle transition failed (non-fatal)", {
         phase,
         issueId: ctx.issue.id,
-        error: reassignErr instanceof Error ? reassignErr.message : String(reassignErr),
+        error: transitionErr instanceof Error ? transitionErr.message : String(transitionErr),
       });
     }
   }
@@ -285,8 +265,6 @@ async function handleCodeReview(
   });
 
   if (result.approved) {
-    // M2-3: Evaluate E2E test need after review passes (optional dispatch)
-    // The E2E decision is non-blocking — story is marked done regardless
     log.info("Review approved, marking issue done", { storyId, passes: result.totalPasses });
 
     await reporter.reportHeartbeatResult(agentId, issue.id, {
@@ -295,16 +273,12 @@ async function handleCodeReview(
       storyId,
     });
 
-    // Update issue metadata with final review result
+    // Lifecycle handles: status → done + wake parent
     if (toolCtx) {
       try {
-        await toolCtx.paperclipClient.updateIssue(issue.id, {
-          metadata: {
-            ...meta,
-            reviewPasses: result.totalPasses,
-            lastReviewResult: "pass",
-            lastReviewFindings: result.summary.slice(0, 500),
-          },
+        await passReview(toolCtx.paperclipClient, issue.id, {
+          reviewPasses: result.totalPasses,
+          lastReviewFindings: result.summary.slice(0, 500),
         });
       } catch {
         // Non-fatal
@@ -315,34 +289,23 @@ async function handleCodeReview(
   }
 
   if (result.escalated) {
-    // Escalate to CEO via parent issue comment
     log.warn("Review escalated", { storyId, passes: result.totalPasses, reason: result.summary });
 
     if (toolCtx) {
       const parentId = (meta?.parentIssueId as string) ?? issue.parentId;
-      if (parentId) {
-        try {
-          await toolCtx.paperclipClient.addIssueComment(
-            parentId,
-            `⚠️ **ESCALATION**: Story "${issue.title}" failed ${result.totalPasses} review passes.\n` +
-            `Findings: ${result.summary}\n` +
-            `CEO action needed: force-approve, reassign, or investigate.`,
-          );
-        } catch {
-          // Non-fatal
-        }
-      }
-
-      // Update issue metadata
       try {
-        await toolCtx.paperclipClient.updateIssue(issue.id, {
-          metadata: {
-            ...meta,
+        await escalateReview(
+          toolCtx.paperclipClient,
+          issue.id,
+          `⚠️ **ESCALATION**: Story "${issue.title}" failed ${result.totalPasses} review passes.\n` +
+          `Findings: ${result.summary}\n` +
+          `CEO action needed: force-approve, reassign, or investigate.`,
+          parentId,
+          {
             reviewPasses: result.totalPasses,
-            lastReviewResult: "escalated",
             lastReviewFindings: result.summary.slice(0, 500),
           },
-        });
+        );
       } catch {
         // Non-fatal
       }
@@ -351,17 +314,16 @@ async function handleCodeReview(
     return { status: "needs-human", message: `Review escalated to CEO (${result.totalPasses} passes)`, storyId };
   }
 
-  // Review failed but not escalated — reassign to Dev for fixes
+  // Review failed but not escalated — lifecycle reassigns to Dev
   if (toolCtx) {
     try {
-      await reassignIssue(
+      await failReview(
         toolCtx.paperclipClient,
         issue.id,
-        "bmad-dev",
         `❌ Code review FAILED (pass ${result.totalPasses}).\n` +
         `Findings:\n${result.summary}\n` +
         `Fix the HIGH/CRITICAL issues and reassign back to bmad-qa.`,
-        { workPhase: "dev-story", reviewFixMode: true },
+        { reviewPasses: result.totalPasses },
       );
     } catch (err) {
       log.warn("Failed to reassign after review failure", {

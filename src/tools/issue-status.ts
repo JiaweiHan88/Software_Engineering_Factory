@@ -11,6 +11,7 @@ import { z } from "zod";
 import { defineTool } from "./types.js";
 import { tryGetToolContext } from "./tool-context.js";
 import { resolveAgentId } from "../adapter/ceo-orchestrator.js";
+import { ROLE_TO_PHASE } from "../adapter/lifecycle.js";
 
 /**
  * Copilot SDK tool: issue_status
@@ -220,11 +221,8 @@ export const issueStatusTool = defineTool("issue_status", {
         // When dev→QA, set workPhase to "code-review".
         // When QA→dev (rejection), set workPhase back to "dev-story".
         // This ensures the heartbeat handler dispatches to the correct phase config.
-        const ROLE_TO_WORK_PHASE: Record<string, string> = {
-          "bmad-qa": "code-review",
-          "bmad-dev": "dev-story",
-        };
-        const autoWorkPhase = ROLE_TO_WORK_PHASE[args.target_role.toLowerCase()];
+        // Uses ROLE_TO_PHASE from lifecycle.ts (single source of truth).
+        const autoWorkPhase = ROLE_TO_PHASE[args.target_role.toLowerCase()];
 
         let metadataUpdate: Record<string, unknown> | undefined;
         try {

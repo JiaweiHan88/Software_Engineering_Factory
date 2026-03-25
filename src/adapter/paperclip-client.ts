@@ -107,6 +107,97 @@ export interface PaperclipGoal {
 }
 
 /**
+ * Compact heartbeat context — returned by `GET /api/issues/:id/heartbeat-context`.
+ *
+ * Contains the issue, its ancestor chain, associated project/goal, the latest
+ * comment cursor, and (when wakeCommentId is supplied) the specific wake comment.
+ * Replaces separate `getIssue()` + `getIssueComments()` calls with a single
+ * round-trip that reduces API calls by ~30%.
+ */
+export interface IssueHeartbeatContext {
+  issue: {
+    id: string;
+    identifier?: string;
+    title: string;
+    description: string;
+    status: string;
+    priority?: string;
+    projectId?: string;
+    goalId?: string;
+    parentId?: string;
+    assigneeAgentId?: string;
+    assigneeUserId?: string;
+    updatedAt?: string;
+  };
+  ancestors: Array<{
+    id: string;
+    identifier?: string;
+    title: string;
+    status: string;
+    priority?: string;
+  }>;
+  project: {
+    id: string;
+    name: string;
+    status: string;
+    targetDate?: string;
+  } | null;
+  goal: {
+    id: string;
+    title: string;
+    status: string;
+    level?: string;
+    parentId?: string;
+  } | null;
+  /** Cursor for incremental comment reads — pass as `after` to getIssueComments() */
+  commentCursor: string | null;
+  /** The specific comment that triggered this wake, if wakeCommentId was provided */
+  wakeComment: PaperclipIssueComment | null;
+}
+
+/** An issue document — stored at `GET /api/issues/:id/documents/:key`. */
+export interface IssueDocument {
+  id: string;
+  issueId: string;
+  key: string;
+  title?: string;
+  format: "markdown" | "text" | "json";
+  body: string;
+  latestRevisionNumber: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/** Dashboard summary — returned by `GET /api/companies/:companyId/dashboard`. */
+export interface DashboardSummary {
+  companyId: string;
+  agents: {
+    active: number;
+    running: number;
+    paused: number;
+    error: number;
+  };
+  tasks: {
+    open: number;
+    inProgress: number;
+    blocked: number;
+    done: number;
+  };
+  costs: {
+    monthSpendCents: number;
+    monthBudgetCents: number;
+    monthUtilizationPercent: number;
+  };
+  pendingApprovals: number;
+  budgets: {
+    activeIncidents: number;
+    pendingApprovals: number;
+    pausedAgents: number;
+    pausedProjects: number;
+  };
+}
+
+/**
  * Paperclip cost event — POST /api/companies/:companyId/cost-events.
  *
  * Feeds the native Paperclip cost dashboard, budget tracking, and
@@ -729,6 +820,106 @@ export class PaperclipClient {
     return this.request<PaperclipGoal[]>(
       "GET",
       `/api/companies/${this.companyId}/goals`,
+    );
+  }
+
+  // ── Heartbeat Context ─────────────────────────────────────────────────
+
+  /**
+   * Get compact heartbeat context for an issue — single round-trip replacement
+   * for separate `getIssue()` + `getIssueComments()` calls.
+   *
+   * Returns issue state, ancestor chain, project/goal info, comment cursor
+   * metadata, and (when wakeCommentId is supplied) the specific wake comment.
+   * Reduces API calls by ~30% on the hot heartbeat path.
+   *
+   * Real endpoint: GET /api/issues/:id/heartbeat-context
+   *
+   * @param issueId - The issue to load context for
+   * @param wakeCommentId - Optional comment that triggered this wake
+   */
+  async getHeartbeatContext(
+    issueId: string,
+    wakeCommentId?: string,
+  ): Promise<IssueHeartbeatContext> {
+    const params = new URLSearchParams();
+    if (wakeCommentId) params.set("wakeCommentId", wakeCommentId);
+    const qs = params.toString();
+    return this.request<IssueHeartbeatContext>(
+      "GET",
+      `/api/issues/${issueId}/heartbeat-context${qs ? `?${qs}` : ""}`,
+    );
+  }
+
+  // ── Issue Documents ───────────────────────────────────────────────────
+
+  /**
+   * List all documents attached to an issue.
+   * Real endpoint: GET /api/issues/:id/documents
+   */
+  async getIssueDocuments(issueId: string): Promise<IssueDocument[]> {
+    return this.request<IssueDocument[]>(
+      "GET",
+      `/api/issues/${issueId}/documents`,
+    );
+  }
+
+  /**
+   * Get a specific document by key.
+   * Real endpoint: GET /api/issues/:id/documents/:key
+   */
+  async getIssueDocument(issueId: string, key: string): Promise<IssueDocument> {
+    return this.request<IssueDocument>(
+      "GET",
+      `/api/issues/${issueId}/documents/${encodeURIComponent(key)}`,
+    );
+  }
+
+  /**
+   * Upsert (create or update) a structured document on an issue.
+   * Real endpoint: PUT /api/issues/:id/documents/:key
+   *
+   * Documents are keyed values (e.g., "plan", "notes", "spec") that store
+   * structured content alongside an issue. Use for storing plans, specs, and
+   * other long-lived artifacts instead of embedding them in descriptions.
+   *
+   * @param issueId - The issue to attach the document to
+   * @param key - Lowercase identifier for the document (e.g., "plan")
+   * @param document - The document content and metadata
+   */
+  async upsertIssueDocument(
+    issueId: string,
+    key: string,
+    document: {
+      title?: string;
+      format: "markdown" | "text" | "json";
+      body: string;
+      changeSummary?: string;
+      baseRevisionId?: string;
+    },
+  ): Promise<IssueDocument> {
+    return this.request<IssueDocument>(
+      "PUT",
+      `/api/issues/${issueId}/documents/${encodeURIComponent(key)}`,
+      document,
+    );
+  }
+
+  // ── Dashboard ─────────────────────────────────────────────────────────
+
+  /**
+   * Get the company dashboard summary.
+   *
+   * Returns agent health (active/running/paused/error counts), task counts,
+   * monthly cost spend and budget utilization, pending approvals, and budget
+   * incidents. Use early in the CEO heartbeat for situational awareness.
+   *
+   * Real endpoint: GET /api/companies/:companyId/dashboard
+   */
+  async getDashboard(): Promise<DashboardSummary> {
+    return this.request<DashboardSummary>(
+      "GET",
+      `/api/companies/${this.companyId}/dashboard`,
     );
   }
 

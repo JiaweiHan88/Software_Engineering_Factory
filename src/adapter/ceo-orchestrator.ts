@@ -26,7 +26,7 @@
  */
 
 import { PaperclipApiError } from "./paperclip-client.js";
-import type { PaperclipClient, PaperclipAgent, PaperclipIssue } from "./paperclip-client.js";
+import type { PaperclipClient, PaperclipAgent, PaperclipIssue, IssueHeartbeatContext } from "./paperclip-client.js";
 import type { PaperclipReporter } from "./reporter.js";
 import type { SessionManager } from "./session-manager.js";
 import type { BmadConfig } from "../config/config.js";
@@ -232,11 +232,33 @@ function isRefinedStory(issue: PaperclipIssue): boolean {
 function buildDelegationPrompt(
   issue: PaperclipIssue,
   agentRoster: PaperclipAgent[],
+  issueCtx?: IssueHeartbeatContext,
 ): string {
   const rosterSummary = agentRoster
     .filter((a) => a.name !== "bmad-ceo") // Exclude CEO from delegation targets
     .map((a) => `  - ${a.name} (${a.title}): ${a.capabilities ?? a.role}`)
     .join("\n");
+
+  const contextSections: string[] = [];
+
+  if (issueCtx?.ancestors && issueCtx.ancestors.length > 0) {
+    const ancestorLines = issueCtx.ancestors
+      .map((a) => `  - [${a.status.toUpperCase()}] ${a.identifier ? `${a.identifier}: ` : ""}${a.title}`)
+      .join("\n");
+    contextSections.push(`## Parent Issue Context\n${ancestorLines}`);
+  }
+
+  if (issueCtx?.goal) {
+    contextSections.push(`## Strategic Goal\n${issueCtx.goal.title} (status: ${issueCtx.goal.status})`);
+  }
+
+  if (issueCtx?.project) {
+    contextSections.push(`## Project\n${issueCtx.project.name} (status: ${issueCtx.project.status})`);
+  }
+
+  const contextBlock = contextSections.length > 0
+    ? `\n${contextSections.join("\n\n")}\n`
+    : "";
 
   return `You are the CEO of the BMAD Copilot Factory. An issue has been assigned to you for delegation.
 
@@ -246,7 +268,7 @@ function buildDelegationPrompt(
 - **Description**: ${issue.description ?? "No description provided."}
 - **Status**: ${issue.status}
 - **Priority**: ${issue.priority ?? "medium"}
-
+${contextBlock}
 ## Available Agents
 ${rosterSummary}
 
@@ -466,6 +488,7 @@ export async function orchestrateCeoIssue(
   config: BmadConfig,
   _mapping: RoleMappingEntry,
   costTracker?: CostTracker,
+  issueCtx?: IssueHeartbeatContext,
 ): Promise<OrchestrationResult> {
   log.info("CEO orchestration starting", {
     issueId: issue.id,
@@ -525,7 +548,7 @@ export async function orchestrateCeoIssue(
   }
 
   // ── 3. Send delegation prompt and get structured plan ──────────────
-  const prompt = buildDelegationPrompt(issue, agentRoster);
+  const prompt = buildDelegationPrompt(issue, agentRoster, issueCtx);
   let response: string;
 
   try {

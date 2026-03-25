@@ -17,7 +17,7 @@
 
 import { getAgent } from "../agents/registry.js";
 import type { AgentDispatcher, WorkPhase } from "./agent-dispatcher.js";
-import type { PaperclipIssue } from "./paperclip-client.js";
+import type { PaperclipIssue, IssueHeartbeatContext } from "./paperclip-client.js";
 import type { PaperclipReporter } from "./reporter.js";
 import type { ReviewOrchestrator } from "../quality-gates/review-orchestrator.js";
 import { reassignIssue } from "./issue-reassignment.js";
@@ -153,6 +153,39 @@ export async function handleHeartbeat(
 }
 
 /**
+ * Build an enriched issue description by appending context from heartbeat-context
+ * (ancestors, goal, project, wake comment) when available.
+ *
+ * This allows dispatch prompts to include richer context without extra API calls.
+ */
+function buildEnrichedDescription(issue: PaperclipIssue, ctx?: IssueHeartbeatContext): string {
+  if (!ctx) return issue.description;
+
+  const parts: string[] = [issue.description];
+
+  if (ctx.ancestors.length > 0) {
+    const ancestorLines = ctx.ancestors
+      .map((a) => `- [${a.status.toUpperCase()}] ${a.identifier ? `${a.identifier}: ` : ""}${a.title}`)
+      .join("\n");
+    parts.push(`\n## Context: Parent Issues\n${ancestorLines}`);
+  }
+
+  if (ctx.goal) {
+    parts.push(`\n## Goal\n${ctx.goal.title} (${ctx.goal.status})`);
+  }
+
+  if (ctx.project) {
+    parts.push(`\n## Project\n${ctx.project.name} (${ctx.project.status})`);
+  }
+
+  if (ctx.wakeComment) {
+    parts.push(`\n## Wake Comment (triggered this run)\n${ctx.wakeComment.body}`);
+  }
+
+  return parts.join("\n");
+}
+
+/**
  * Handle a Paperclip issue received via inbox-polling or webhook callback.
  *
  * Converts the PaperclipIssue into a HeartbeatContext, dispatches the work,
@@ -167,6 +200,7 @@ export async function handleHeartbeat(
  * @param dispatcher - The agent dispatcher to route work through
  * @param reporter - Reporter to send results back to Paperclip via issue comments
  * @param reviewOrchestrator - Optional ReviewOrchestrator for full adversarial review loop
+ * @param issueCtx - Optional compact heartbeat context (ancestors, project, goal, wake comment)
  * @returns HeartbeatResult
  */
 export async function handlePaperclipIssue(
@@ -176,8 +210,10 @@ export async function handlePaperclipIssue(
   dispatcher: AgentDispatcher,
   reporter: PaperclipReporter,
   reviewOrchestrator?: ReviewOrchestrator,
+  issueCtx?: IssueHeartbeatContext,
 ): Promise<HeartbeatResult> {
-  // Convert PaperclipIssue → HeartbeatContext
+  // Convert PaperclipIssue → HeartbeatContext, enriching with heartbeat-context data
+  const enrichedDescription = buildEnrichedDescription(issue, issueCtx);
   const ctx: HeartbeatContext = {
     agentId,
     bmadRole,
@@ -185,7 +221,7 @@ export async function handlePaperclipIssue(
     issue: {
       id: issue.id,
       title: issue.title,
-      description: issue.description,
+      description: enrichedDescription,
       storyId: issue.storyId,
       phase: issue.phase as WorkPhase | undefined,
       metadata: issue.metadata,

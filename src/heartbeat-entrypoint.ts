@@ -36,7 +36,7 @@ import "dotenv/config";
 import { resolve } from "node:path";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { PaperclipClient } from "./adapter/paperclip-client.js";
-import type { PaperclipAgent, PaperclipIssue } from "./adapter/paperclip-client.js";
+import type { PaperclipAgent, PaperclipIssue, IssueHeartbeatContext } from "./adapter/paperclip-client.js";
 import { PaperclipReporter } from "./adapter/reporter.js";
 import { SessionManager } from "./adapter/session-manager.js";
 import { AgentDispatcher } from "./adapter/agent-dispatcher.js";
@@ -499,7 +499,45 @@ async function main(): Promise<void> {
 
   const reporter = new PaperclipReporter(paperclipClient, 500, resolvedWorkspaceCwd);
 
-  // ── Step 3: Identify self ─────────────────────────────────────────
+  // ── Step 2b: Budget check ─────────────────────────────────────────────
+  // Check agent budget utilization before doing any work. Paperclip will
+  // auto-pause agents that hit 100%, but we check early to avoid starting
+  // work we can't finish and to log a clear warning above 80%.
+  try {
+    const agentBudgetCheck = useAgentKey
+      ? await paperclipClient.getAgentSelf()
+      : await paperclipClient.getAgent(env.agentId);
+
+    const budgetMonthly = (agentBudgetCheck.metadata?.budgetMonthlyCents as number | undefined) ?? agentBudgetCheck.monthlyBudget;
+    const spentMonthly = agentBudgetCheck.metadata?.spentMonthlyCents as number | undefined;
+
+    if (typeof budgetMonthly === "number" && budgetMonthly > 0 && typeof spentMonthly === "number") {
+      const utilizationPct = (spentMonthly / budgetMonthly) * 100;
+      if (utilizationPct >= 100) {
+        log.error("Agent budget hard-stop reached — aborting heartbeat", {
+          spentMonthlyCents: spentMonthly,
+          budgetMonthlyCents: budgetMonthly,
+          utilizationPct: utilizationPct.toFixed(1),
+        });
+        process.exit(0); // Clean exit — this is expected behavior, not a crash
+      } else if (utilizationPct >= 80) {
+        log.warn("Agent budget critical threshold — proceeding with caution", {
+          spentMonthlyCents: spentMonthly,
+          budgetMonthlyCents: budgetMonthly,
+          utilizationPct: utilizationPct.toFixed(1),
+        });
+      } else {
+        log.info("Agent budget OK", {
+          utilizationPct: utilizationPct.toFixed(1),
+        });
+      }
+    }
+  } catch (budgetErr) {
+    // Non-fatal — budget check failure should not block the heartbeat
+    log.warn("Budget check failed (non-fatal)", {
+      error: budgetErr instanceof Error ? budgetErr.message : String(budgetErr),
+    });
+  }
   // In board-access mode, use GET /api/agents/:id (no auth needed).
   // With agent-key auth, /api/agents/me resolves the agent from the key.
   let agentSelf: PaperclipAgent;
@@ -636,6 +674,38 @@ async function main(): Promise<void> {
       log.warn("Triggered task not found in inbox — it may have been resolved or reassigned", {
         taskId: env.taskId,
       });
+    }
+  }
+
+  // ── Step 5c: Wake-reason routing (P1-6) ────────────────────────────
+  // Route behavior based on WHY this heartbeat was triggered.
+  // This shapes which issue gets priority and what context is pre-loaded.
+  if (env.wakeReason) {
+    switch (env.wakeReason) {
+      case "comment":
+        // A comment was posted — the triggering comment is critical context.
+        // Log it now; it will be fetched via heartbeat-context in Step 8.
+        log.info("Woke on comment — will prioritize wake comment context", {
+          taskId: env.taskId ?? "n/a",
+          wakeCommentId: env.wakeCommentId ?? "n/a",
+        });
+        break;
+
+      case "assignment":
+        // A new task was assigned — this is the normal dev path.
+        log.info("Woke on assignment", { taskId: env.taskId ?? "n/a" });
+        break;
+
+      case "on_demand":
+        // Manually triggered (board user or test script) — treat as assignment.
+        log.info("Woke on demand", { taskId: env.taskId ?? "n/a" });
+        break;
+
+      case "timer":
+      default:
+        // Scheduled heartbeat — process inbox normally.
+        log.info("Woke on timer (scheduled heartbeat)");
+        break;
     }
   }
 
@@ -833,6 +903,30 @@ async function main(): Promise<void> {
         companyId: env.companyId,
       });
 
+      // ── P1-8: Fetch rich heartbeat context (single round-trip) ──────
+      // Replaces separate getIssue() + getIssueComments() calls.
+      // Provides ancestors, project/goal linkage, comment cursor, and
+      // (for comment-wakes) the specific triggering comment.
+      let heartbeatCtx: IssueHeartbeatContext | undefined;
+      try {
+        const wakeCommentId = issue.id === env.taskId ? env.wakeCommentId : undefined;
+        heartbeatCtx = await paperclipClient.getHeartbeatContext(lockedIssue.id, wakeCommentId);
+        log.info("Heartbeat context loaded", {
+          issueId: lockedIssue.id,
+          ancestorCount: heartbeatCtx.ancestors.length,
+          hasProject: !!heartbeatCtx.project,
+          hasGoal: !!heartbeatCtx.goal,
+          hasWakeComment: !!heartbeatCtx.wakeComment,
+          commentCursor: heartbeatCtx.commentCursor ?? "n/a",
+        });
+      } catch (ctxErr) {
+        // Non-fatal — fall back to the minimal issue data from inbox
+        log.warn("Failed to load heartbeat context, using inbox data", {
+          issueId: lockedIssue.id,
+          error: ctxErr instanceof Error ? ctxErr.message : String(ctxErr),
+        });
+      }
+
       if (mapping.isOrchestrator) {
         // ── CEO routing: initial delegation vs re-evaluation ──────────
         // If sub-issues already exist → re-evaluate (promote backlog tasks
@@ -872,6 +966,7 @@ async function main(): Promise<void> {
             config,
             mapping,
             costTracker,
+            heartbeatCtx,
           );
           log.info("CEO orchestration result", {
             issueId: lockedIssue.id,
@@ -881,7 +976,7 @@ async function main(): Promise<void> {
         }
       } else {
         // Domain agent: process the issue directly
-        await handlePaperclipIssue(lockedIssue, env.agentId, bmadRole, dispatcher, reporter, reviewOrchestrator);
+        await handlePaperclipIssue(lockedIssue, env.agentId, bmadRole, dispatcher, reporter, reviewOrchestrator, heartbeatCtx);
       }
       // On success: don't release — checkout holds until status change
       // ── M0: Clear tool context after processing ─────────────────────

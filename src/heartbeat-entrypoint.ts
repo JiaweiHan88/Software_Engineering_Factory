@@ -238,9 +238,9 @@ function extractPaperclipEnv(): PaperclipEnv {
 function resolveSkillDirectories(mapping: RoleMappingEntry, projectRoot: string): string[] {
   const dirs: string[] = [];
 
-  // 1. Agent-specific BMAD skills (from _bmad/skills/ directory)
+  // 1. Agent-specific BMAD skills (from bmad_res/skills/ directory)
   for (const skillName of mapping.bmadSkills) {
-    const skillDir = resolve(projectRoot, "_bmad/skills", skillName);
+    const skillDir = resolve(projectRoot, "bmad_res/skills", skillName);
     if (existsSync(skillDir)) {
       dirs.push(skillDir);
     } else {
@@ -334,7 +334,7 @@ interface AgentConfigFiles {
  * Load the 4-file agent configuration set from disk.
  *
  * Reads AGENTS.md, SOUL.md, HEARTBEAT.md, TOOLS.md from the
- * `_bmad/agents/{agentConfigDir}/` directory. These are injected as the
+ * `bmad_res/agents/{agentConfigDir}/` directory. These are injected as the
  * system message for the Copilot SDK session, giving the agent its
  * identity, persona, heartbeat protocol, and tool awareness.
  *
@@ -343,7 +343,7 @@ interface AgentConfigFiles {
  * @returns The 4-file content, or null if the config dir doesn't exist
  */
 function loadAgentConfigFiles(mapping: RoleMappingEntry, projectRoot: string): AgentConfigFiles | null {
-  const configDir = resolve(projectRoot, "_bmad/agents", mapping.agentConfigDir);
+  const configDir = resolve(projectRoot, "bmad_res/agents", mapping.agentConfigDir);
 
   if (!existsSync(configDir)) {
     log.warn("Agent config directory not found", {

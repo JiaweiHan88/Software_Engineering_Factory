@@ -932,7 +932,7 @@ async function ensureProjectContextIssue(agentIds: Map<string, string>): Promise
         title: "Generate project context file",
         description:
           "Run the bmad-generate-project-context skill to produce project-context.md. " +
-          "Use defaults from _bmad/bmm/config.yaml. Analyze the codebase and save the output. " +
+          "Use defaults from bmad_res/bmm/config.yaml. Analyze the codebase and save the output. " +
           "Mark this issue done when complete.",
         status: "todo",
         assigneeAgentId: techWriterId,

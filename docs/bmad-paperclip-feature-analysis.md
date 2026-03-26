@@ -27,7 +27,7 @@
 
 ### The Core Finding
 
-Our TypeScript tools (`src/tools/`) and BMAD skills (`_bmad/`, `skills/`) **do overlapping
+Our TypeScript tools (`src/tools/`) and BMAD skills (`bmad_res/`, `skills/`) **do overlapping
 work but at different quality levels**, and their instructions **conflict** at runtime.
 
 The BMAD skills provide rich, battle-tested LLM methodology (10-step TDD, parallel

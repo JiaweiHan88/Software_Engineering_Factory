@@ -448,7 +448,7 @@ function getPhaseConfig(): Record<WorkPhase, PhaseConfig> {
         ``,
         `## Instructions`,
         `1. Run the \`bmad-generate-project-context\` skill to produce \`${config.projectRoot}/project-context.md\`.`,
-        `2. Use defaults from \`${config.projectRoot}/_bmad/bmm/config.yaml\` — do NOT stop to ask questions.`,
+        `2. Use defaults from \`${config.projectRoot}/bmad_res/bmm/config.yaml\` — do NOT stop to ask questions.`,
         `3. Analyze the codebase at \`${config.projectRoot}\` to extract architecture, conventions, and guidelines.`,
         `4. Do NOT use sprint-status.yaml — use issue_status tool for state management.`,
         `5. After saving \`project-context.md\`, mark this issue done using issue_status.`,

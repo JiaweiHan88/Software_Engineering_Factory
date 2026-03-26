@@ -20,7 +20,7 @@ export interface RoleMappingEntry {
   displayName: string;
   /** Whether this role orchestrates (delegates) rather than does domain work */
   isOrchestrator: boolean;
-  /** Directory name under _bmad/agents/ containing the 4-file config set */
+  /** Directory name under bmad_res/agents/ containing the 4-file config set */
   agentConfigDir: string;
   /** BMAD skill directories this role should have loaded */
   bmadSkills: string[];

@@ -93,7 +93,7 @@ The BMAD Copilot Factory bridges two systems:
 |-------|-------|
 | **Paperclip Role** | `ceo` / `bmad-ceo` |
 | **BMAD Agent** | None (orchestrates, doesn't do domain work) |
-| **4-File Config** | `_bmad/agents/ceo/` |
+| **4-File Config** | `bmad_res/agents/ceo/` |
 | **Capabilities** | Issue decomposition, dependency-aware delegation, re-evaluation, unblocking |
 | **Tools** | `sprint_status` |
 | **Model Tier** | Powerful/Reasoning (strategic reasoning) |

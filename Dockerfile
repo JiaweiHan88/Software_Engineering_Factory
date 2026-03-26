@@ -40,7 +40,7 @@ COPY package.json ./
 
 # Copy templates and BMAD config
 COPY templates/ templates/
-COPY _bmad/ _bmad/
+COPY bmad_res/ bmad_res/
 
 # Create output directory
 RUN mkdir -p _bmad-output

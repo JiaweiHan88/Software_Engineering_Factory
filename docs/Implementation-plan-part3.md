@@ -423,11 +423,11 @@ new comments on subsequent heartbeats.
 **What:** Wire the `bmad-generate-project-context` skill to produce `project-context.md`.
 
 **Why:** All 9 agent personas reference `project-context.md` at activation (Step 2 of
-persona loading reads `_bmad/bmm/config.yaml` which points to project context). Currently
+persona loading reads `bmad_res/bmm/config.yaml` which points to project context). Currently
 this file is missing — agents load empty context.
 
 **Agent:** Tech Writer (`bmad-tech-writer`)  
-**Skill source:** `_bmad/bmm/workflows/bmad-generate-project-context/`
+**Skill source:** `bmad_res/bmm/workflows/bmad-generate-project-context/`
 
 **Implementation:**
 1. Add `WorkPhase.GENERATE_PROJECT_CONTEXT` to `agent-dispatcher.ts`
@@ -443,7 +443,7 @@ this file is missing — agents load empty context.
 **What:** Wire product brief discovery skill for the PM agent.
 
 **Agent:** PM (`bmad-pm`)  
-**Skill source:** `_bmad/bmm/workflows/1-analysis/bmad-create-product-brief/`
+**Skill source:** `bmad_res/bmm/workflows/1-analysis/bmad-create-product-brief/`
 
 **Implementation:**
 1. Add `WorkPhase.CREATE_PRODUCT_BRIEF` to dispatcher
@@ -457,9 +457,9 @@ this file is missing — agents load empty context.
 
 | Skill | Agent | Source |
 |-------|-------|--------|
-| `bmad-brainstorming` | PM / Analyst | `_bmad/core/skills/bmad-brainstorming/` |
-| `bmad-market-research` | PM / Analyst | `_bmad/bmm/workflows/1-analysis/research/` |
-| `bmad-technical-research` | Architect | `_bmad/bmm/workflows/1-analysis/research/` |
+| `bmad-brainstorming` | PM / Analyst | `bmad_res/core/skills/bmad-brainstorming/` |
+| `bmad-market-research` | PM / Analyst | `bmad_res/bmm/workflows/1-analysis/research/` |
+| `bmad-technical-research` | Architect | `bmad_res/bmm/workflows/1-analysis/research/` |
 
 **Implementation:**
 1. Add `WorkPhase.RESEARCH_BRAINSTORM`, `.RESEARCH_MARKET`, `.RESEARCH_TECHNICAL`
@@ -474,8 +474,8 @@ BMAD standards, editing for revisions.
 
 **Agent:** PM (`bmad-pm`)  
 **Skill sources:**
-- `_bmad/core/tasks/bmad-create-prd/` — 12-step PRD creation workflow
-- `_bmad/bmm/workflows/2-plan-workflows/bmad-validate-prd/` — validation checklist
+- `bmad_res/core/tasks/bmad-create-prd/` — 12-step PRD creation workflow
+- `bmad_res/bmm/workflows/2-plan-workflows/bmad-validate-prd/` — validation checklist
 
 **Implementation:**
 1. Add `WorkPhase.CREATE_PRD`, `WorkPhase.VALIDATE_PRD`
@@ -489,7 +489,7 @@ BMAD standards, editing for revisions.
 **What:** Wire the architecture creation skill for the Architect agent.
 
 **Agent:** Architect (`bmad-architect`)  
-**Skill source:** `_bmad/bmm/workflows/3-solutioning/bmad-create-architecture/`
+**Skill source:** `bmad_res/bmm/workflows/3-solutioning/bmad-create-architecture/`
 
 **Implementation:**
 1. Add `WorkPhase.CREATE_ARCHITECTURE`
@@ -502,7 +502,7 @@ BMAD standards, editing for revisions.
 **What:** Wire UX design creation for the UX Designer agent.
 
 **Agent:** UX Designer (`bmad-ux-designer`)  
-**Skill source:** `_bmad/bmm/workflows/2-plan-workflows/bmad-create-ux-design/`
+**Skill source:** `bmad_res/bmm/workflows/2-plan-workflows/bmad-create-ux-design/`
 
 **Implementation:**
 1. Add `WorkPhase.CREATE_UX_DESIGN`
@@ -515,7 +515,7 @@ BMAD standards, editing for revisions.
 and UX specs are complete and consistent.
 
 **Agent:** PM (`bmad-pm`)  
-**Skill source:** `_bmad/bmm/workflows/3-solutioning/bmad-check-implementation-readiness/`
+**Skill source:** `bmad_res/bmm/workflows/3-solutioning/bmad-check-implementation-readiness/`
 
 **Implementation:**
 1. Add `WorkPhase.CHECK_IMPLEMENTATION_READINESS`
@@ -531,7 +531,7 @@ and UX specs are complete and consistent.
 user stories with acceptance criteria.
 
 **Agent:** PM (`bmad-pm`)  
-**Skill source:** `_bmad/bmm/workflows/3-solutioning/bmad-create-epics-and-stories/`
+**Skill source:** `bmad_res/bmm/workflows/3-solutioning/bmad-create-epics-and-stories/`
 
 **Implementation:**
 1. Add `WorkPhase.CREATE_EPICS_AND_STORIES`
@@ -544,7 +544,7 @@ user stories with acceptance criteria.
 **What:** QA agent generates end-to-end tests from completed features.
 
 **Agent:** QA (`bmad-qa`)  
-**Skill source:** `_bmad/bmm/workflows/bmad-qa-generate-e2e-tests/`
+**Skill source:** `bmad_res/bmm/workflows/bmad-qa-generate-e2e-tests/`
 
 **Implementation:**
 1. Add `WorkPhase.GENERATE_E2E_TESTS`
@@ -557,7 +557,7 @@ user stories with acceptance criteria.
 **What:** Post-epic/post-sprint lessons learned and process improvement.
 
 **Agent:** Scrum Master (`bmad-sm`)  
-**Skill source:** `_bmad/bmm/workflows/4-implementation/bmad-retrospective/`
+**Skill source:** `bmad_res/bmm/workflows/4-implementation/bmad-retrospective/`
 
 **Implementation:**
 1. Add `WorkPhase.RETROSPECTIVE`
@@ -570,7 +570,7 @@ user stories with acceptance criteria.
 **What:** Mid-sprint course correction when requirements change or blockers appear.
 
 **Agent:** SM / PM  
-**Skill source:** `_bmad/bmm/workflows/4-implementation/bmad-correct-course/`
+**Skill source:** `bmad_res/bmm/workflows/4-implementation/bmad-correct-course/`
 
 **Implementation:**
 1. Add `WorkPhase.CORRECT_COURSE`
@@ -655,7 +655,7 @@ Phase tracking (per parent issue):
 **What:** When the CEO faces ambiguous or high-stakes decisions, invoke `bmad-party-mode`
 for a multi-agent roundtable discussion.
 
-**Skill source:** `_bmad/core/skills/bmad-party-mode/workflow.md`
+**Skill source:** `bmad_res/core/skills/bmad-party-mode/workflow.md`
 
 **When to trigger:**
 - Architecture decisions with multiple viable approaches
@@ -692,7 +692,7 @@ on new_issue:
 After any agent produces output, the CEO can invoke elicitation to push for
 higher quality.
 
-**Skill source:** `_bmad/core/skills/bmad-advanced-elicitation/`
+**Skill source:** `bmad_res/core/skills/bmad-advanced-elicitation/`
 
 **Implementation:**
 - Add as optional post-processing in `agent-dispatcher.ts`
@@ -813,8 +813,8 @@ On heartbeat:
 | `bmad-testarch-trace` | Generate traceability matrix (requirements → tests) | LOW |
 | `bmad-teach-me-testing` | Interactive testing education | LOW |
 
-**Skill source:** `_bmad/tea/workflows/testarch/`  
-**Knowledge base:** `_bmad/tea/testarch/knowledge/` (42 articles on fixtures, API patterns,
+**Skill source:** `bmad_res/tea/workflows/testarch/`  
+**Knowledge base:** `bmad_res/tea/testarch/knowledge/` (42 articles on fixtures, API patterns,
 CI, Pact, Playwright, mocking, etc.)
 
 **Implementation:**

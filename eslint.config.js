@@ -42,7 +42,7 @@ export default tseslint.config(
       "node_modules/",
       "observability/",
       "templates/",
-      "_bmad/",
+      "bmad_res/",
       "_bmad-output/",
       "scripts/",
       "test/",

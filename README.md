@@ -2,7 +2,7 @@
 
 > Autonomous Software Building Factory — Paperclip orchestration + GitHub Copilot SDK agents + BMAD Method
 
-[![Tests](https://img.shields.io/badge/tests-333%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-480%20passing-brightgreen)]()
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7%2B-blue)]()
 [![Node](https://img.shields.io/badge/Node.js-20%2B-green)]()
 [![Copilot SDK](https://img.shields.io/badge/Copilot%20SDK-0.1.32-purple)]()
@@ -17,7 +17,7 @@ A 3-layer autonomous software development system:
 | **Methodology** | [BMAD Method](https://github.com/bmad-code-org/BMAD-METHOD) | Sprint lifecycle, story creation, adversarial code review, quality gates |
 | **Execution** | [Copilot SDK](https://github.com/github/copilot-sdk) | Programmable agent runtime: custom agents, tools, MCP, skills |
 
-The factory reads a `sprint-status.yaml`, dispatches stories to specialized AI agents (PM, Architect, Developer, QA, Scrum Master), enforces quality gates with severity-scored adversarial review, and advances stories through the BMAD lifecycle — all autonomously.
+The factory reads assigned issues from Paperclip, dispatches them to specialized AI agents (PM, Architect, Developer, QA, Scrum Master), enforces quality gates with severity-scored adversarial review, and advances work through the BMAD lifecycle — all autonomously.
 
 Paperclip uses a **push model**: it spawns agent processes via heartbeats, each process runs the full 10-step pipeline (identify → resolve role → check inbox → dispatch → report costs → cleanup), and reports results back as issue comments. A **CEO orchestrator** analyzes incoming issues, builds delegation plans, and creates sub-issues for specialist agents.
 
@@ -150,14 +150,14 @@ pnpm start:paperclip                    # Run inbox-polling integration loop
 ### Run with webhook server (production mode)
 
 ```bash
-PAPERCLIP_MODE=webhook npx tsx src/webhook-server.ts   # Start HTTP listener on :3200
+PAPERCLIP_MODE=webhook npx tsx src/webhook-server.ts   # Start HTTP listener on :4200
 # Paperclip sends POST /heartbeat/invoke → BMAD pipeline
 ```
 
 ### Run tests
 
 ```bash
-pnpm test                               # 333 tests, ~2.5s
+pnpm test                               # 480 tests, ~3.5s
 pnpm test:watch                         # Watch mode
 pnpm typecheck                          # TypeScript strict check
 ```
@@ -177,89 +177,105 @@ pnpm typecheck                          # TypeScript strict check
 | MCP server | `pnpm mcp:sprint` | Expose sprint data via MCP |
 | Setup company | `npx tsx scripts/setup-paperclip-company.ts` | Provision agents & org chart in Paperclip |
 | Update pricing | `npx tsx scripts/update-model-pricing.ts` | Manage LLM model pricing data |
-| E2E smoke test | `npx tsx scripts/e2e-smoke-invoke.ts` | End-to-end integration test with Paperclip |
+| E2E test | `npx tsx scripts/e2e-test.ts` | End-to-end pipeline test (smoke/full/autonomous) |
 
 ## Project Structure
 
 ```
 src/
 ├── agents/              # 9 BMAD agent persona definitions
-│   ├── types.ts         # BmadAgent interface
-│   ├── registry.ts      # Agent lookup + allAgents array
-│   ├── developer.ts     # bmad-dev
-│   ├── product-manager.ts # bmad-pm
-│   ├── architect.ts     # bmad-architect
-│   ├── qa-engineer.ts   # bmad-qa
-│   ├── scrum-master.ts  # bmad-sm
+│   ├── types.ts         # BmadAgent interface {name, displayName, description, prompt}
+│   ├── registry.ts      # Agent lookup: allAgents[], getAgent(name)
+│   ├── developer.ts     # "Amelia" — bmad-dev — story implementation, TDD
+│   ├── product-manager.ts # "John" — bmad-pm — PRD creation, requirements
+│   ├── architect.ts     # "Winston" — bmad-architect — system design
+│   ├── qa-engineer.ts   # "Quinn" — bmad-qa — adversarial code review
+│   ├── scrum-master.ts  # "Bob" — bmad-sm — sprint planning
 │   └── ...              # analyst, tech-writer, ux-designer, quick-flow
 │
 ├── tools/               # Copilot SDK defineTool() implementations
-│   ├── create-story.ts  # Story creation from backlog
-│   ├── dev-story.ts     # Story implementation
-│   ├── code-review.ts   # Adversarial code review
-│   ├── sprint-status.ts # Sprint YAML read/write
-│   └── types.ts         # Tool type definitions
+│   ├── create-story.ts  # create_story — markdown + Paperclip issue creation
+│   ├── code-review.ts   # code_review + code_review_result — adversarial review
+│   ├── issue-status.ts  # issue_status — read/update/reassign Paperclip issues
+│   ├── sprint-status.ts # [DEPRECATED] sprint-status.yaml CRUD
+│   ├── tool-context.ts  # Thread-safe workspace + story context injection
+│   └── types.ts         # Tool type re-exports from Copilot SDK
 │
-├── adapter/             # Orchestration engine
-│   ├── session-manager.ts    # CopilotClient wrapper with session lifecycle
-│   ├── agent-dispatcher.ts   # Phase → agent routing with model selection
+├── adapter/             # Paperclip ↔ Copilot SDK bridge layer
+│   ├── session-manager.ts    # CopilotClient lifecycle, session create/resume/persist
+│   ├── agent-dispatcher.ts   # Phase → agent routing, model selection, prompt building
 │   ├── ceo-orchestrator.ts   # CEO delegation: analyze → plan → sub-issues → summarize
-│   ├── sprint-runner.ts      # Story lifecycle engine
+│   ├── lifecycle.ts          # ★ Single source of truth for ALL issue state transitions
+│   ├── issue-reassignment.ts # SM→Dev→QA handoff protocol, checkout release
 │   ├── health-check.ts       # 5-probe system readiness check
-│   ├── paperclip-client.ts   # Paperclip REST API client (issues, agents, cost-events)
-│   ├── paperclip-loop.ts     # Issue-driven integration (inbox-polling bridge)
-│   ├── heartbeat-handler.ts  # Paperclip Issue → BMAD dispatch bridge
-│   ├── reporter.ts           # Reports results via issue comments
-│   └── retry.ts              # Exponential backoff with jitter for Paperclip API calls
+│   ├── paperclip-client.ts   # Paperclip REST API client (~20 endpoints)
+│   ├── paperclip-loop.ts     # Inbox-polling integration loop (dev mode)
+│   ├── heartbeat-handler.ts  # Issue → dispatcher bridge, context enrichment
+│   ├── reporter.ts           # Results → Paperclip issue comments
+│   ├── retry.ts              # Exponential backoff with jitter
+│   └── sprint-runner.ts      # [DEPRECATED] old YAML-based lifecycle engine
 │
 ├── quality-gates/       # BMAD adversarial review system
-│   ├── types.ts         # Severity, findings, verdicts
-│   ├── engine.ts        # Pure gate evaluation logic
-│   ├── review-orchestrator.ts  # Multi-pass review loop
-│   └── tool.ts          # quality_gate_evaluate tool
+│   ├── types.ts         # Severity, FindingCategory, ReviewFinding, GateResult
+│   ├── engine.ts        # Pure gate evaluation: scoring, verdicts (PASS/FAIL/ESCALATE)
+│   ├── review-orchestrator.ts  # Multi-pass review loop with fix cycles
+│   └── tool.ts          # quality_gate_evaluate — structured findings evaluation
 │
 ├── observability/       # Production observability stack
-│   ├── logger.ts        # Structured JSON/human-readable logger
-│   ├── tracing.ts       # OpenTelemetry distributed tracing
-│   ├── metrics.ts       # OTel counters, histograms, gauges
+│   ├── logger.ts        # Structured JSON/human-readable logger with level filtering
+│   ├── tracing.ts       # OpenTelemetry distributed tracing to Jaeger
+│   ├── metrics.ts       # OTel metrics: 8 instruments (counters, histograms, gauges)
 │   ├── cost-tracker.ts  # Token estimation, 34 model pricing entries, budget tracking
-│   └── stall-detector.ts # Stuck story detection + alerting
+│   └── stall-detector.ts # Phase timeout monitoring + escalation
 │
 ├── config/              # Runtime configuration
-│   ├── config.ts        # BmadConfig with env var loading
-│   └── model-strategy.ts # Complexity → model tier routing
+│   ├── config.ts        # loadConfig() — 30+ env vars → BmadConfig
+│   ├── model-strategy.ts # Complexity → model tier routing (fast/standard/powerful)
+│   └── role-mapping.ts  # Paperclip agent → BMAD persona + skills mapping
+│
+├── skills/              # Copilot SDK skill prompts
+│   ├── bmad-methodology/ # BMAD method skill definitions
+│   └── quality-gates/   # Quality gate skill prompts
 │
 ├── mcp/                 # MCP server (VS Code integration)
 │   └── bmad-sprint-server/
 │       ├── index.ts     # Stdio MCP server entry
 │       └── tools.ts     # 5 tool handlers
 │
-├── heartbeat-entrypoint.ts  # 10-step pipeline entry point for Paperclip processes
-├── webhook-server.ts        # HTTP server for Paperclip push-mode callbacks
+├── utils/               # Shared utilities
+│   └── comment-format.ts # Markdown linkification for Paperclip URLs
+│
+├── sandbox/             # Development/testing scripts (hello-copilot, test-agent, etc.)
+├── heartbeat-entrypoint.ts  # ★ 10-step pipeline entry point for Paperclip processes
+├── webhook-server.ts        # HTTP server for Paperclip push-mode callbacks (:3200)
+├── health.ts                # Health check HTTP handler (/health)
 └── index.ts                 # Main entry point + CLI parsing
 
 scripts/
 ├── setup-paperclip-company.ts  # Provision company, 10 agents, org chart in Paperclip
 ├── update-model-pricing.ts     # Manage LLM pricing data (--show, --apply, --json)
-├── e2e-smoke-invoke.ts         # End-to-end smoke test via Paperclip invoke API
-├── e2e-smoke.ts                # Basic connectivity smoke test
+├── e2e-test.ts                 # E2E pipeline test (smoke/full/autonomous modes)
+├── e2e-helpers.ts              # Paperclip API helpers, heartbeat polling, log streaming
 ├── convert-bmad-agents.ts      # Auto-generate agent files from BMAD templates
-├── setup-paperclip.sh          # Clone + patch Paperclip repo
-├── start-paperclip-native.sh   # Start Paperclip without Docker
-└── reset-and-run-otel.sh       # Reset observability stack
+├── test-streaming.ts           # Streaming output test utility
+└── start-paperclip.sh          # Docker Compose wrapper for Paperclip
 
-test/                    # 333 tests across 16 files
-observability/           # Docker observability stack configs
+test/                    # 480 tests across 25 files
+├── adapter/             # CEO sequential, issue reassignment tests
+├── tools/               # create-story, code-review, issue-status, tool-context tests
+└── *.test.ts            # Unit tests for all major components
+
+observability/           # Docker observability stack configs (OTel, Prometheus, Grafana)
 templates/               # Paperclip role templates + Clipper presets
-_bmad-output/            # Sprint artifacts (stories, reviews, status)
-docs/                    # Architecture, PRD, research
+_bmad-output/            # Runtime work output (stories, reviews, status)
+docs/                    # Architecture, PRD, research, generated documentation
 ```
 
 ## BMAD Agents
 
 | Agent | Name | Role |
 |-------|------|------|
-| **CEO** | `bmad-ceo` | Orchestrator: analyzes issues, builds delegation plans, creates sub-issues |
+| **CEO** | — | Orchestrator (`ceo-orchestrator.ts`): analyzes issues, builds delegation plans, creates sub-issues |
 | Product Manager | `bmad-pm` | Writes PRDs, defines stories, prioritizes backlog |
 | Architect | `bmad-architect` | System design, tech stack decisions, data models |
 | Developer | `bmad-dev` | Implements stories, writes code and tests |
@@ -391,46 +407,77 @@ sequenceDiagram
 | `PAPERCLIP_COMPANY_ID` | `bmad-factory` | Company ID (company-scoped) |
 | `PAPERCLIP_AGENT_API_KEY` | — | Agent API key for Bearer auth |
 | `PAPERCLIP_MODE` | `inbox-polling` | Integration mode: `inbox-polling` or `webhook` |
-| `WEBHOOK_PORT` | `3200` | Port for webhook server (production mode) |
-| `MODEL_PREFER_BYOK` | `false` | Prefer BYOK over Copilot quota |
+| `WEBHOOK_PORT` | `4200` | Port for webhook server (`webhook-server.ts`) |
+| `MODEL_PREFER_BYOK` | `false` | Prefer BYOK over Copilot quota (read by `model-strategy.ts`) |
 | `STALL_AUTO_ESCALATE` | `false` | Auto-escalate stalled stories |
+| `REVIEW_PASS_LIMIT` | `3` | Max review passes before human escalation |
+| `BMAD_OUTPUT_DIR` | `_bmad-output` | Output directory for stories, reviews, sessions |
+| `BMAD_SPRINT_STATUS_PATH` | `_bmad-output/sprint-status.yaml` | Sprint status file path |
+| `PAPERCLIP_TIMEOUT_MS` | `30000` | HTTP request timeout for Paperclip API calls |
+| `PAPERCLIP_INBOX_CHECK_INTERVAL_MS` | `30000` | Inbox polling interval (inbox-polling mode) |
+| `STALL_CHECK_INTERVAL_MS` | `300000` | Stall detector check interval |
+| `COPILOT_GHE_HOST` | — | GitHub Enterprise hostname (if using GHE) |
 
-See [PRD](./docs/PRD.md) for the full environment variable reference (22 variables).
+See [PRD](./docs/generated/PRD-generated.md) for the full environment variable reference.
 
 ## Test Suite
 
-333 tests across 16 files, running in ~2.5s:
+480 tests across 25 files, running in ~3.5s:
 
 ```
+ ✓ test/agent-dispatcher.test.ts       (64 tests)
+ ✓ test/cost-tracker.test.ts           (47 tests)
+ ✓ test/wake-context.test.ts           (34 tests)
+ ✓ test/paperclip-client.test.ts       (33 tests)
+ ✓ test/session-manager.test.ts        (30 tests)
+ ✓ test/ceo-orchestrator.test.ts       (28 tests)
+ ✓ test/heartbeat-handler.test.ts      (27 tests)
  ✓ test/quality-gate-engine.test.ts    (24 tests)
- ✓ test/model-strategy.test.ts         (22 tests)
- ✓ test/paperclip-client.test.ts       (21 tests)
- ✓ test/cost-tracker.test.ts           (20 tests)
+ ✓ test/model-strategy.test.ts         (23 tests)
+ ✓ test/checkout-release.test.ts       (22 tests)
  ✓ test/health-check.test.ts           (19 tests)
- ✓ test/session-manager.test.ts        (19 tests)
- ✓ test/agent-dispatcher.test.ts       (17 tests)
- ✓ test/ceo-orchestrator.test.ts       (53 tests)
- ✓ test/heartbeat-handler.test.ts      (36 tests)
- ✓ test/retry.test.ts                  (30 tests)
+ ✓ test/retry.test.ts                  (17 tests)
+ ✓ test/tools/issue-status.test.ts     (16 tests)
+ ✓ test/adapter/ceo-sequential.test.ts (12 tests)
  ✓ test/stall-detector.test.ts         (12 tests)
+ ✓ test/review-orchestrator.test.ts    (11 tests)
+ ✓ test/tools/tool-context.test.ts     (11 tests)
+ ✓ test/sprint-runner.test.ts          (10 tests)
  ✓ test/logger.test.ts                  (9 tests)
- ✓ test/review-orchestrator.test.ts     (9 tests)
- ✓ test/sprint-runner.test.ts           (8 tests)
- ✓ test/hello-bmad.test.ts              (3 tests)
- ✓ test/health.test.ts                  (2 tests)
+ ✓ test/tools/code-review.test.ts       (9 tests)
+ ✓ test/tools/create-story.test.ts      (7 tests)
+ ✓ test/adapter/issue-reassignment.test.ts (6 tests)
+ ✓ test/quality-gate-tool.test.ts       (5 tests)
+ ✓ test/health.test.ts                  (3 tests)
+ ✓ test/hello-bmad.test.ts              (1 test)
 
- Test Files  16 passed (16)
-      Tests  333 passed (333)
+ Test Files  25 passed (25)
+      Tests  480 passed (480)
 ```
 
 ## Documentation
 
+### Generated Documentation (from exhaustive source analysis)
+
 | Doc | Description |
 |-----|-------------|
-| [PRD](./docs/PRD.md) | Product Requirements Document — all functional & non-functional requirements |
-| [Architecture](./docs/architecture.md) | System design, data flow, observability, design decisions |
-| [Implementation Plan](./IMPLEMENTATION-PLAN.md) | Phased build plan with delivery summaries per phase |
-| [Research](./research-autonomous-sw-factory.md) | Technical research on autonomous software building systems |
+| [Index](./docs/generated/index.md) | Master navigation for all documentation |
+| [PRD](./docs/generated/PRD-generated.md) | Product Requirements Document — functional & non-functional requirements, acceptance criteria |
+| [Architecture](./docs/generated/architecture-generated.md) | 6-layer system design, data flow, design decisions, observability |
+| [Component Inventory](./docs/generated/component-inventory.md) | 9 agents, 10 tools, adapter/quality/observability components |
+| [API Contracts](./docs/generated/api-contracts.md) | ~20 Paperclip API endpoints, data models, auth, error handling |
+| [Development Guide](./docs/generated/development-guide.md) | Setup, 30+ env vars, testing (480 tests), code conventions |
+| [Deployment Guide](./docs/generated/deployment-guide.md) | 5 modes, Docker, OTel, Grafana, health checks |
+| [Project Overview](./docs/generated/project-overview.md) | High-level summary, tech stack, entry points, key metrics |
+| [Source Tree](./docs/generated/source-tree-analysis.md) | Annotated directory tree with purposes and criticality |
+
+### Reference Documentation
+
+| Doc | Description |
+|-----|-------------|
+| [Architecture (original)](./docs/architecture.md) | Original architecture document |
+| [Implementation Plan](./docs/implementation-plan.md) | Phased build plan with delivery summaries |
+| [Research](./docs/research-autonomous-sw-factory.md) | Technical research on autonomous software building systems |
 
 ## Project Status
 

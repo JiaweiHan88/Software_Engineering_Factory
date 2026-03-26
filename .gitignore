@@ -8,3 +8,7 @@ coverage/
 .turbo/
 companies/
 _bmad-output/
+_bmad/
+# GitHub skills (external)
+.github/
+.claude/

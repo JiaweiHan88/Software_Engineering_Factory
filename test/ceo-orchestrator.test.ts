@@ -40,6 +40,7 @@ import {
 import type { DelegationPlan } from "../src/adapter/ceo-orchestrator.js";
 import type { PaperclipAgent, PaperclipIssue } from "../src/adapter/paperclip-client.js";
 import type { RoleMappingEntry } from "../src/config/role-mapping.js";
+import { clearLabelCache } from "../src/adapter/label-manager.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // parseDelegationPlan
@@ -268,6 +269,7 @@ describe("resolveAgentId", () => {
 describe("orchestrateCeoIssue", () => {
   beforeEach(() => {
     clearAgentIdCache();
+    clearLabelCache();
   });
 
   const mockIssue: PaperclipIssue = {
@@ -304,7 +306,9 @@ describe("orchestrateCeoIssue", () => {
   };
 
   function createMockClient() {
+    let labelCounter = 0;
     return {
+      company: "test-company",
       listAgents: vi.fn().mockResolvedValue(mockAgentList),
       listIssues: vi.fn().mockResolvedValue([]),
       createIssue: vi.fn().mockImplementation(async (issue: Partial<PaperclipIssue>) => ({
@@ -313,6 +317,11 @@ describe("orchestrateCeoIssue", () => {
       })),
       addIssueComment: vi.fn().mockResolvedValue({ id: "comment-1", body: "", issueId: "" }),
       updateIssue: vi.fn().mockResolvedValue(mockIssue),
+      listLabels: vi.fn().mockResolvedValue([]),
+      createLabel: vi.fn().mockImplementation(async (name: string, color: string) => {
+        labelCounter++;
+        return { id: `label-${labelCounter}`, name, color };
+      }),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any;
   }

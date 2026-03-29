@@ -438,9 +438,14 @@ export async function checkSiblingDependencies(
     // sequential promotion logic in ceo-orchestrator, not dependency-based.
     if (typeof meta?.storySequence === "number") continue;
 
-    const dependsOn = Array.isArray(meta?.dependsOn)
-      ? (meta.dependsOn as number[])
-      : [];
+    const rawDeps = Array.isArray(meta?.dependsOn) ? meta.dependsOn : [];
+    const dependsOn = rawDeps.filter((v): v is number => typeof v === "number");
+    if (dependsOn.length !== rawDeps.length) {
+      log.warn("Ignoring non-numeric dependsOn entries", {
+        issueId: sib.id.slice(0, 8),
+        raw: rawDeps,
+      });
+    }
 
     // No deps — should already be todo, but promote as safety net
     if (dependsOn.length === 0) {
@@ -449,6 +454,17 @@ export async function checkSiblingDependencies(
       log.info("Promoted sibling (no deps)", {
         issueId: sib.id.slice(0, 8),
         identifier: sib.identifier,
+      });
+      continue;
+    }
+
+    // Check for deps referencing non-existent taskIndex values
+    const missingDeps = dependsOn.filter((d) => !statusByIndex.has(d));
+    if (missingDeps.length > 0) {
+      log.warn("Dependency references non-existent taskIndex — skipping promotion", {
+        issueId: sib.id.slice(0, 8),
+        identifier: sib.identifier,
+        missingDeps,
       });
       continue;
     }
@@ -480,9 +496,8 @@ export async function checkSiblingDependencies(
     const meta = sib.metadata as Record<string, unknown> | undefined;
     if (typeof meta?.storySequence === "number") continue;
 
-    const dependsOn = Array.isArray(meta?.dependsOn)
-      ? (meta.dependsOn as number[])
-      : [];
+    const rawDeps2 = Array.isArray(meta?.dependsOn) ? meta.dependsOn : [];
+    const dependsOn = rawDeps2.filter((v): v is number => typeof v === "number");
     if (dependsOn.length === 0) continue;
 
     const allDepsDone = dependsOn.every((depIdx) => {

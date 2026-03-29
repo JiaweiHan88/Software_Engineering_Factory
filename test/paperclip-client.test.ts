@@ -109,6 +109,52 @@ describe("PaperclipClient", () => {
     });
   });
 
+  describe("setActingAgent (BUGFIX-002)", () => {
+    it("sends X-Paperclip-Agent-Id header when acting agent is set", async () => {
+      client.setActingAgent("agent-uuid-123");
+      mockFetch.mockResolvedValueOnce(jsonResponse({ id: "a1" }));
+
+      await client.getAgent("a1");
+
+      const [, opts] = mockFetch.mock.calls[0];
+      expect(opts.headers["X-Paperclip-Agent-Id"]).toBe("agent-uuid-123");
+    });
+
+    it("omits X-Paperclip-Agent-Id header when no acting agent set", async () => {
+      mockFetch.mockResolvedValueOnce(jsonResponse({ id: "a1" }));
+
+      await client.getAgent("a1");
+
+      const [, opts] = mockFetch.mock.calls[0];
+      expect(opts.headers["X-Paperclip-Agent-Id"]).toBeUndefined();
+    });
+
+    it("clears X-Paperclip-Agent-Id header when set to undefined", async () => {
+      client.setActingAgent("agent-uuid-123");
+      client.setActingAgent(undefined);
+      mockFetch.mockResolvedValueOnce(jsonResponse({ id: "a1" }));
+
+      await client.getAgent("a1");
+
+      const [, opts] = mockFetch.mock.calls[0];
+      expect(opts.headers["X-Paperclip-Agent-Id"]).toBeUndefined();
+    });
+
+    it("works normally when no acting agent set (backward compat)", async () => {
+      const noAuthClient = new PaperclipClient({
+        baseUrl: "http://localhost:3100",
+        companyId: "test",
+      });
+      mockFetch.mockResolvedValueOnce(jsonResponse([]));
+
+      await noAuthClient.listAgents();
+
+      const [, opts] = mockFetch.mock.calls[0];
+      expect(opts.headers["X-Paperclip-Agent-Id"]).toBeUndefined();
+      expect(opts.headers["Content-Type"]).toBe("application/json");
+    });
+  });
+
   describe("agent management", () => {
     it("creates an agent via POST /api/companies/:companyId/agents", async () => {
       const agent: PaperclipAgent = {

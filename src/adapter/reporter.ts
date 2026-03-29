@@ -21,10 +21,37 @@ import type { HeartbeatResult } from "./heartbeat-handler.js";
 import type { SprintEvent } from "./sprint-runner.js";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { Logger } from "../observability/logger.js";
 import { linkifyTickets } from "../utils/comment-format.js";
+import { getAgent } from "../agents/registry.js";
+import { ROLE_MAPPING } from "../config/role-mapping.js";
 
 const log = Logger.child("reporter");
+
+/**
+ * Resolve a human-readable display name for an agent ID.
+ *
+ * Lookup order:
+ * 1. BMAD agent registry (src/agents/registry.ts) — has displayName like "Amelia - Dev"
+ * 2. ROLE_MAPPING table (src/config/role-mapping.ts) — covers CEO and aliases
+ * 3. Fallback to the raw agentId
+ *
+ * @param agentId - BMAD agent ID (e.g., "bmad-dev", "ceo")
+ * @returns Display name suitable for comment attribution
+ */
+export function resolveAgentDisplayName(agentId: string): string {
+  // 1. BMAD agent registry
+  const bmadAgent = getAgent(agentId);
+  if (bmadAgent) return bmadAgent.displayName;
+
+  // 2. Role mapping table
+  const mapping = ROLE_MAPPING[agentId] ?? ROLE_MAPPING[agentId.toLowerCase()];
+  if (mapping) return mapping.displayName;
+
+  // 3. Fallback
+  return agentId;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Report History
@@ -60,6 +87,8 @@ export class PaperclipReporter {
   private history: ReportLogEntry[] = [];
   private maxHistorySize: number;
   private workspaceDir: string | undefined;
+  /** Dedup map: issueId → SHA-256 hash of last artifact listing posted. */
+  private lastArtifactHash = new Map<string, string>();
 
   constructor(client: PaperclipClient, maxHistorySize = 500, workspaceDir?: string) {
     this.client = client;
@@ -92,18 +121,20 @@ export class PaperclipReporter {
       "needs-human": "⚠️",
     };
 
-    const comment = `${statusEmoji[result.status]} **${result.status.toUpperCase()}** — ${result.message}`;
-    await this.postIssueComment(agentId, issueId, result.status, comment);
+    const displayName = resolveAgentDisplayName(agentId);
+    let comment = `${statusEmoji[result.status]} **${result.status.toUpperCase()}** — **${displayName}:** ${result.message}`;
 
-    // On completion, scan workspace for artifacts and append to comment.
+    // On completion, scan workspace for artifacts and merge into the status comment.
     // NOTE: Status transitions (done, blocked, reassignment) are handled
     // exclusively by lifecycle.ts — the reporter is comment-only.
     if (result.status === "completed" && this.workspaceDir) {
       const artifactInfo = this.scanWorkspaceArtifacts();
-      if (artifactInfo) {
-        await this.postIssueComment(agentId, issueId, "artifacts", artifactInfo);
+      if (artifactInfo && !this.isArtifactDuplicate(issueId, artifactInfo)) {
+        comment += `\n\n${artifactInfo}`;
       }
     }
+
+    await this.postIssueComment(agentId, issueId, result.status, comment);
   }
 
   /**
@@ -122,7 +153,8 @@ export class PaperclipReporter {
   ): Promise<void> {
     const status = result.success ? "completed" : "failed";
     const emoji = result.success ? "✅" : "❌";
-    let comment = `${emoji} **${status.toUpperCase()}** — ${result.success
+    const displayName = resolveAgentDisplayName(agentId);
+    let comment = `${emoji} **${status.toUpperCase()}** — **${displayName}:** ${result.success
       ? `${result.agentName} completed successfully.`
       : `${result.agentName} failed: ${result.error ?? "unknown error"}`
     }`;
@@ -145,33 +177,36 @@ export class PaperclipReporter {
     switch (event.type) {
       case "story-complete":
         if (agentId && event.result.success) {
+          const completeName = resolveAgentDisplayName(agentId);
           await this.postIssueComment(
             agentId,
             event.storyId,
             "completed",
-            `✅ Phase ${event.phase} completed by ${event.result.agentName}.`,
+            `✅ **${completeName}:** Phase ${event.phase} completed by ${event.result.agentName}.`,
           );
         }
         break;
 
       case "story-escalated":
         if (agentId) {
+          const escalateName = resolveAgentDisplayName(agentId);
           await this.postIssueComment(
             agentId,
             event.storyId,
             "needs-human",
-            `⚠️ **ESCALATED** — ${event.reason}`,
+            `⚠️ **ESCALATED** — **${escalateName}:** ${event.reason}`,
           );
         }
         break;
 
       case "story-failed":
         if (agentId) {
+          const failName = resolveAgentDisplayName(agentId);
           await this.postIssueComment(
             agentId,
             event.storyId,
             "failed",
-            `❌ **FAILED** — ${event.error}`,
+            `❌ **FAILED** — **${failName}:** ${event.error}`,
           );
         }
         break;
@@ -189,6 +224,22 @@ export class PaperclipReporter {
   }
 
   // ── Low-Level Reporting ───────────────────────────────────────────────
+
+  /**
+   * Check if the artifact listing is identical to the last one posted for this issue.
+   * Updates the stored hash if it's new content.
+   *
+   * @param issueId - The issue ID
+   * @param artifactInfo - The formatted artifact listing string
+   * @returns true if duplicate (should skip), false if new content
+   */
+  private isArtifactDuplicate(issueId: string, artifactInfo: string): boolean {
+    const hash = createHash("sha256").update(artifactInfo).digest("hex");
+    const prev = this.lastArtifactHash.get(issueId);
+    if (prev === hash) return true;
+    this.lastArtifactHash.set(issueId, hash);
+    return false;
+  }
 
   /**
    * Scan the workspace directory for artifact files produced by agents.
@@ -218,10 +269,11 @@ export class PaperclipReporter {
       return [
         `📁 **Workspace Artifacts** (\`${this.workspaceDir}\`):`,
         "",
-        // Format: `filename` | 42 KB — preview
+        // Format: filename | 42 KB — preview
+        // No backtick wrapping — prevents Paperclip UI from rendering duplicate file badges (BUG-010).
         // Avoid parenthesized decimal sizes like "(41.2 KB)" because Paperclip's
         // file browser plugin regex matches "41.2" as a file path with extension ".2".
-        ...files.map((f) => `- \`${f.name}\` | ${Math.round(parseFloat(f.sizeKb))} KB — ${f.preview}`),
+        ...files.map((f) => `- ${f.name} | ${Math.round(parseFloat(f.sizeKb))} KB — ${f.preview}`),
       ].join("\n");
     } catch {
       return undefined;

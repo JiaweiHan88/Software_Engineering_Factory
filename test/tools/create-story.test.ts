@@ -58,6 +58,7 @@ vi.mock("../../src/config/index.js", () => ({
 
 import { setToolContext, clearToolContext } from "../../src/tools/tool-context.js";
 import type { PaperclipClient } from "../../src/adapter/paperclip-client.js";
+import { clearLabelCache } from "../../src/adapter/label-manager.js";
 
 // Force module load
 await import("../../src/tools/create-story.js");
@@ -67,7 +68,9 @@ await import("../../src/tools/create-story.js");
 // ─────────────────────────────────────────────────────────────────────────────
 
 function makeMockClient(overrides?: Record<string, unknown>): PaperclipClient {
+  let labelCounter = 0;
   return {
+    company: "test-company",
     getIssue: vi.fn(),
     createIssue: vi.fn().mockResolvedValue({
       id: "new-issue-uuid",
@@ -81,6 +84,11 @@ function makeMockClient(overrides?: Record<string, unknown>): PaperclipClient {
     releaseIssue: vi.fn(),
     checkoutIssue: vi.fn(),
     listAgents: vi.fn().mockResolvedValue([]),
+    listLabels: vi.fn().mockResolvedValue([]),
+    createLabel: vi.fn().mockImplementation(async (name: string, color: string) => {
+      labelCounter++;
+      return { id: `label-${labelCounter}`, name, color };
+    }),
     ...overrides,
   } as unknown as PaperclipClient;
 }
@@ -96,6 +104,7 @@ describe("create_story tool", () => {
     tmpDir = await mkdtemp(join(tmpdir(), "create-story-test-"));
     mockOutputDir = tmpDir;
     clearToolContext();
+    clearLabelCache();
   });
 
   afterEach(async () => {
@@ -274,5 +283,241 @@ describe("create_story tool", () => {
         storyFilePath: "_bmad-output/stories/S-PATHS.md",
       }),
     }));
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // BUGFIX-001: dependsOn and projectId tests
+  // ─────────────────────────────────────────────────────────────────────
+
+  it("auto-discovers dependsOn from previous sibling when story_sequence > 1 (AC-1)", async () => {
+    const client = makeMockClient({
+      listIssues: vi.fn().mockResolvedValue([
+        {
+          id: "sibling-seq-2",
+          identifier: "BMAD-10",
+          title: "Previous Story",
+          status: "backlog",
+          metadata: { storyId: "S-002", storySequence: 2, epicId: "epic-1" },
+        },
+      ]),
+      getIssue: vi.fn().mockResolvedValue({
+        id: "parent-issue",
+        title: "Parent",
+        status: "open",
+        projectId: null,
+      }),
+    });
+    setToolContext({
+      paperclipClient: client,
+      agentId: "agent-sm",
+      issueId: "parent-issue",
+      workspaceDir: tmpDir,
+      companyId: "co-1",
+    });
+
+    await capturedHandler({
+      epic_id: "epic-1",
+      story_id: "S-003",
+      story_title: "Third Story",
+      story_description: "Depends on S-002",
+      story_sequence: 3,
+    });
+
+    expect(client.createIssue).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({
+        dependsOn: ["sibling-seq-2"],
+        storySequence: 3,
+      }),
+    }));
+  });
+
+  it("sets dependsOn to [] when story_sequence is 1 (AC-2)", async () => {
+    const client = makeMockClient({
+      getIssue: vi.fn().mockResolvedValue({
+        id: "parent-issue",
+        title: "Parent",
+        status: "open",
+        projectId: null,
+      }),
+    });
+    setToolContext({
+      paperclipClient: client,
+      agentId: "agent-sm",
+      issueId: "parent-issue",
+      workspaceDir: tmpDir,
+      companyId: "co-1",
+    });
+
+    await capturedHandler({
+      epic_id: "epic-1",
+      story_id: "S-001",
+      story_title: "First Story",
+      story_description: "No deps",
+      story_sequence: 1,
+    });
+
+    expect(client.createIssue).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({
+        dependsOn: [],
+      }),
+    }));
+  });
+
+  it("sets dependsOn to [] when story_sequence is 0 (AC-2)", async () => {
+    const client = makeMockClient({
+      getIssue: vi.fn().mockResolvedValue({
+        id: "parent-issue",
+        title: "Parent",
+        status: "open",
+        projectId: null,
+      }),
+    });
+    setToolContext({
+      paperclipClient: client,
+      agentId: "agent-sm",
+      issueId: "parent-issue",
+      workspaceDir: tmpDir,
+      companyId: "co-1",
+    });
+
+    await capturedHandler({
+      epic_id: "epic-1",
+      story_id: "S-000",
+      story_title: "Zero Seq Story",
+      story_description: "No deps",
+      story_sequence: 0,
+    });
+
+    expect(client.createIssue).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({
+        dependsOn: [],
+      }),
+    }));
+  });
+
+  it("passes projectId from parent issue (AC-3)", async () => {
+    const client = makeMockClient({
+      getIssue: vi.fn().mockResolvedValue({
+        id: "parent-issue",
+        title: "Parent",
+        status: "open",
+        projectId: "proj-42",
+      }),
+    });
+    setToolContext({
+      paperclipClient: client,
+      agentId: "agent-sm",
+      issueId: "parent-issue",
+      workspaceDir: tmpDir,
+      companyId: "co-1",
+    });
+
+    await capturedHandler({
+      epic_id: "epic-1",
+      story_id: "S-PROJ",
+      story_title: "Project Story",
+      story_description: "Has projectId",
+      story_sequence: 1,
+    });
+
+    expect(client.createIssue).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: "proj-42",
+    }));
+  });
+
+  it("does not crash when parent has null projectId (AC-4)", async () => {
+    const client = makeMockClient({
+      getIssue: vi.fn().mockResolvedValue({
+        id: "parent-issue",
+        title: "Parent",
+        status: "open",
+        projectId: null,
+      }),
+    });
+    setToolContext({
+      paperclipClient: client,
+      agentId: "agent-sm",
+      issueId: "parent-issue",
+      workspaceDir: tmpDir,
+      companyId: "co-1",
+    });
+
+    const result = await capturedHandler({
+      epic_id: "epic-1",
+      story_id: "S-NULL",
+      story_title: "Null Project Story",
+      story_description: "Parent has no project",
+      story_sequence: 1,
+    });
+
+    expect(result.resultType).toBe("success");
+    // Should NOT have projectId in the call
+    const callArgs = (client.createIssue as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(callArgs.projectId).toBeUndefined();
+  });
+
+  it("preserves existing metadata fields when adding dependsOn (AC-5)", async () => {
+    const client = makeMockClient({
+      getIssue: vi.fn().mockResolvedValue({
+        id: "parent-issue",
+        title: "Parent",
+        status: "open",
+        projectId: "proj-99",
+      }),
+    });
+    setToolContext({
+      paperclipClient: client,
+      agentId: "agent-sm",
+      issueId: "parent-issue",
+      workspaceDir: tmpDir,
+      companyId: "co-1",
+    });
+
+    await capturedHandler({
+      epic_id: "epic-5",
+      story_id: "S-META",
+      story_title: "Metadata Merge",
+      story_description: "All fields present",
+      story_sequence: 1,
+    });
+
+    expect(client.createIssue).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: "proj-99",
+      metadata: expect.objectContaining({
+        bmadPhase: "execute",
+        storyId: "S-META",
+        storyFilePath: "_bmad-output/stories/S-META.md",
+        epicId: "epic-5",
+        storySequence: 1,
+        workPhase: "create-story",
+        reviewPasses: 0,
+        dependsOn: [],
+      }),
+    }));
+  });
+
+  it("does not crash when getIssue fails for parent (projectId fallback)", async () => {
+    const client = makeMockClient({
+      getIssue: vi.fn().mockRejectedValue(new Error("Not found")),
+    });
+    setToolContext({
+      paperclipClient: client,
+      agentId: "agent-sm",
+      issueId: "parent-issue",
+      workspaceDir: tmpDir,
+      companyId: "co-1",
+    });
+
+    const result = await capturedHandler({
+      epic_id: "epic-1",
+      story_id: "S-FAIL",
+      story_title: "Fail parent fetch",
+      story_description: "getIssue fails",
+      story_sequence: 1,
+    });
+
+    expect(result.resultType).toBe("success");
+    const callArgs = (client.createIssue as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(callArgs.projectId).toBeUndefined();
   });
 });

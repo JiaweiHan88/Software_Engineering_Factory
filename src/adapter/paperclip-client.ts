@@ -57,7 +57,8 @@ export interface PaperclipIssue {
   companyId?: string;
   /** Paperclip field: priority (critical | high | medium | low) */
   priority?: string;
-  labels?: string[];
+  /** Paperclip field: labelIds (UUIDs of attached labels) */
+  labelIds?: string[];
   /** BMAD-specific: story ID mapped from issue metadata */
   storyId?: string;
   /** BMAD-specific: workflow phase */
@@ -242,6 +243,16 @@ export interface PaperclipCostEvent {
 // API Error
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Paperclip label — matches real label shape from `/api/companies/:companyId/labels`. */
+export interface PaperclipLabel {
+  id: string;
+  name: string;
+  color: string;
+  companyId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 /** Structured error from Paperclip API calls. */
 export class PaperclipApiError extends Error {
   readonly statusCode: number;
@@ -315,6 +326,8 @@ export class PaperclipClient {
   private companyId: string;
   private timeoutMs: number;
   private heartbeatRunId?: string;
+  /** Acting agent ID — sent as X-Paperclip-Agent-Id on mutating calls in local_trusted mode */
+  private actingAgentId?: string;
 
   constructor(opts: PaperclipClientOptions) {
     // Strip trailing slash
@@ -324,6 +337,20 @@ export class PaperclipClient {
     this.companyId = opts.companyId ?? "default";
     this.timeoutMs = opts.timeoutMs ?? 10_000;
     this.heartbeatRunId = opts.heartbeatRunId;
+  }
+
+  /**
+   * Set the acting agent ID. When set, an `X-Paperclip-Agent-Id` header is
+   * included on all requests so the Paperclip server can attribute actions
+   * (issue creation, comments) to the correct agent.
+   *
+   * Call this in heartbeat-entrypoint.ts once the agent identity is known.
+   * Safe to call multiple times (e.g., when re-dispatching to a different agent).
+   *
+   * @param agentId - Paperclip agent UUID, or undefined to clear
+   */
+  setActingAgent(agentId: string | undefined): void {
+    this.actingAgentId = agentId;
   }
 
   // ── Internal HTTP helpers ─────────────────────────────────────────────
@@ -344,6 +371,9 @@ export class PaperclipClient {
     }
     if (this.heartbeatRunId) {
       h["X-Paperclip-Run-Id"] = this.heartbeatRunId;
+    }
+    if (this.actingAgentId) {
+      h["X-Paperclip-Agent-Id"] = this.actingAgentId;
     }
     return h;
   }
@@ -641,7 +671,7 @@ export class PaperclipClient {
    */
   async updateIssue(
     issueId: string,
-    updates: Partial<Pick<PaperclipIssue, "title" | "description" | "status" | "assigneeAgentId" | "priority" | "labels" | "metadata" | "parentId">>,
+    updates: Partial<Pick<PaperclipIssue, "title" | "description" | "status" | "assigneeAgentId" | "priority" | "labelIds" | "metadata" | "parentId">>,
   ): Promise<PaperclipIssue> {
     return this.request<PaperclipIssue>(
       "PATCH",
@@ -976,6 +1006,34 @@ export class PaperclipClient {
     } catch {
       return false;
     }
+  }
+
+  // ── Labels ─────────────────────────────────────────────────────────────
+
+  /**
+   * List all labels for the company.
+   * Real endpoint: GET /api/companies/:companyId/labels
+   */
+  async listLabels(): Promise<PaperclipLabel[]> {
+    return this.request<PaperclipLabel[]>(
+      "GET",
+      `/api/companies/${this.companyId}/labels`,
+    );
+  }
+
+  /**
+   * Create a new label in the company.
+   * Real endpoint: POST /api/companies/:companyId/labels
+   *
+   * @param name - Label name (max 48 chars)
+   * @param color - Hex color string (e.g., "#3B82F6")
+   */
+  async createLabel(name: string, color: string): Promise<PaperclipLabel> {
+    return this.request<PaperclipLabel>(
+      "POST",
+      `/api/companies/${this.companyId}/labels`,
+      { name, color },
+    );
   }
 
   /**

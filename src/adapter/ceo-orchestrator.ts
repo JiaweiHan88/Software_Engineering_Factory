@@ -29,6 +29,7 @@ import { PaperclipApiError } from "./paperclip-client.js";
 import type { PaperclipClient, PaperclipAgent, PaperclipIssue, PaperclipApproval, IssueHeartbeatContext } from "./paperclip-client.js";
 import type { PaperclipReporter } from "./reporter.js";
 import { PHASE_TO_ROLE, promoteToTodo, closeParent, checkSiblingDependencies } from "./lifecycle.js";
+import { ensureLabel, LABEL_COLORS } from "./label-manager.js";
 import { linkifyTickets } from "../utils/comment-format.js";
 import type { SessionManager } from "./session-manager.js";
 import type { BmadConfig } from "../config/config.js";
@@ -244,7 +245,7 @@ function buildDelegationPrompt(
   const rosterSummary = agentRoster
     .filter((a) => {
       const bmadRole = (a.metadata as Record<string, unknown> | undefined)?.bmadRole;
-      return bmadRole !== "bmad-ceo" && a.name !== "bmad-ceo";
+      return bmadRole !== "bmad-ceo";
     })
     .map((a) => {
       const bmadRole = (a.metadata as Record<string, unknown> | undefined)?.bmadRole as string | undefined;
@@ -712,6 +713,9 @@ export async function orchestrateCeoIssue(
     }
 
     try {
+      // Resolve phase label for this sub-issue
+      const phaseLabelId = await ensureLabel(client, `phase:${task.phase}`, LABEL_COLORS.phase);
+
       const subIssue = await client.createIssue({
         title: task.title,
         description: [
@@ -729,6 +733,7 @@ export async function orchestrateCeoIssue(
         assigneeAgentId: assigneeId,
         goalId: issue.goalId,
         projectId: issue.projectId,
+        labelIds: [phaseLabelId],
         metadata: {
           bmadPhase: task.phase,
           parentIssueId: issue.id,

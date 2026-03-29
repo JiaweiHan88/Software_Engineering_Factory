@@ -17,6 +17,7 @@ import { z } from "zod";
 import { defineTool } from "./types.js";
 import { tryGetToolContext } from "./tool-context.js";
 import { loadConfig } from "../config/index.js";
+import { ensureLabel, LABEL_COLORS } from "../adapter/label-manager.js";
 
 /**
  * Generate a BMAD story markdown template.
@@ -96,6 +97,10 @@ export const createStoryTool = defineTool("create_story", {
       .number()
       .optional()
       .describe("Sequence number within the epic for ordering (e.g., 1, 2, 3)"),
+    depends_on: z
+      .array(z.string())
+      .optional()
+      .describe("Paperclip issue IDs this story depends on. Auto-discovered from previous story in epic if not provided."),
   }),
   handler: async (args) => {
     const config = loadConfig();
@@ -147,6 +152,35 @@ export const createStoryTool = defineTool("create_story", {
           };
         }
 
+        // Resolve dependsOn: use explicit value, auto-discover from siblings, or default to []
+        const storySequence = args.story_sequence ?? 0;
+        let dependsOn: string[] = args.depends_on ?? [];
+        if (!args.depends_on && storySequence > 1) {
+          const prevSibling = existingSiblings.find((s) => {
+            const meta = s.metadata as Record<string, unknown> | undefined;
+            return meta?.storySequence === storySequence - 1 && s.status !== "cancelled";
+          });
+          if (prevSibling) {
+            dependsOn = [prevSibling.id];
+          }
+        }
+
+        // Resolve projectId from parent issue
+        let projectId: string | undefined;
+        try {
+          const parentIssue = await ctx.paperclipClient.getIssue(parentIssueId);
+          projectId = parentIssue.projectId ?? undefined;
+        } catch {
+          // Non-fatal — continue without projectId
+        }
+
+        // Resolve labels for epic, phase, and type
+        const labelIds = await Promise.all([
+          ensureLabel(ctx.paperclipClient, `epic:${args.epic_id}`, LABEL_COLORS.epic),
+          ensureLabel(ctx.paperclipClient, "phase:execute", LABEL_COLORS.phase),
+          ensureLabel(ctx.paperclipClient, "story", LABEL_COLORS.type),
+        ]);
+
         const issue = await ctx.paperclipClient.createIssue({
           title: args.story_title,
           description: [
@@ -158,14 +192,17 @@ export const createStoryTool = defineTool("create_story", {
           ].join("\n"),
           status: "backlog",
           parentId: parentIssueId,
+          ...(projectId ? { projectId } : {}),
+          labelIds,
           metadata: {
             bmadPhase: "execute",
             storyId: args.story_id,
             storyFilePath: storyRelativePath,
             epicId: args.epic_id,
-            storySequence: args.story_sequence ?? 0,
+            storySequence: storySequence,
             workPhase: "create-story",
             reviewPasses: 0,
+            dependsOn,
           },
         });
 

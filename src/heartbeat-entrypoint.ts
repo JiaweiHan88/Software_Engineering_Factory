@@ -485,6 +485,10 @@ async function main(): Promise<void> {
     deploymentMode: deploymentMode ?? "unknown",
   });
 
+  // BUGFIX-002: Set acting agent ID so Paperclip can attribute API calls
+  // (issue creation, comments) to the correct agent via X-Paperclip-Agent-Id header.
+  paperclipClient.setActingAgent(env.agentId);
+
   // Resolve workspace CWD: Paperclip's workspace runtime (PAPERCLIP_WORKSPACE_CWD)
   // takes precedence, then TARGET_PROJECT_ROOT from .env, then undefined.
   const resolvedWorkspaceCwd = env.workspaceCwd || process.env.TARGET_PROJECT_ROOT || undefined;

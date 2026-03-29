@@ -679,7 +679,7 @@ async function createAgents(): Promise<Map<string, string>> {
           `/api/agents/${existingAgent.id}`,
           {
             adapterConfig: desiredAdapterConfig,
-            metadata: { ...existingMeta, bmadRole: def.bmadRoleKey, configDir: def.configDir },
+            metadata: { ...existingMeta, bmadRole: def.bmadRoleKey, configDir: def.configDir, bmadSkills: def.bmadSkills },
           },
         );
         log(`${DIM}♻️${NC}`, `Already exists: ${def.name} → ${existingAgent.id} (config synced)`);

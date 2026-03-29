@@ -28,7 +28,7 @@
 import { PaperclipApiError } from "./paperclip-client.js";
 import type { PaperclipClient, PaperclipAgent, PaperclipIssue, PaperclipApproval, IssueHeartbeatContext } from "./paperclip-client.js";
 import type { PaperclipReporter } from "./reporter.js";
-import { PHASE_TO_ROLE, promoteToTodo, closeParent } from "./lifecycle.js";
+import { PHASE_TO_ROLE, promoteToTodo, closeParent, checkSiblingDependencies } from "./lifecycle.js";
 import { linkifyTickets } from "../utils/comment-format.js";
 import type { SessionManager } from "./session-manager.js";
 import type { BmadConfig } from "../config/config.js";
@@ -128,10 +128,12 @@ let agentIdCache: Map<string, string> | null = null;
 /**
  * Resolve a BMAD role name (e.g., "bmad-pm") to a Paperclip agent UUID.
  *
- * Uses the Paperclip `title` field which stores the BMAD role name
- * (set during Phase 1 agent creation).
+ * Resolution priority:
+ * 1. metadata.bmadRole — stable internal role key (preferred)
+ * 2. agent.name — Paperclip display name (may be changed by users)
+ * 3. agent.title — human-readable role title
  *
- * @param roleName - BMAD role name (e.g., "bmad-dev", "bmad-architect")
+ * @param roleName - BMAD role name (e.g., "bmad-dev", "bmad-architect") or agent display name
  * @param client - Paperclip API client
  * @returns Agent UUID, or undefined if not found
  */
@@ -144,16 +146,19 @@ export async function resolveAgentId(
     agentIdCache = new Map();
     try {
       const agents = await client.listAgents();
+
+      // Pass 1: Map by agent.name and agent.title (lower priority)
       for (const agent of agents) {
-        // Map by agent name (primary key — e.g., "bmad-quick-flow")
         if (agent.name) {
           agentIdCache.set(agent.name.toLowerCase(), agent.id);
         }
-        // Map by human title (e.g., "Barry", "Quinn")
         if (agent.title) {
           agentIdCache.set(agent.title.toLowerCase(), agent.id);
         }
-        // Map by metadata.bmadRole (e.g., from setup script)
+      }
+
+      // Pass 2: Map by metadata.bmadRole (highest priority — overwrites collisions)
+      for (const agent of agents) {
         const bmadRole = (agent.metadata as Record<string, unknown> | undefined)?.bmadRole;
         if (typeof bmadRole === "string") {
           agentIdCache.set(bmadRole.toLowerCase(), agent.id);
@@ -237,8 +242,15 @@ function buildDelegationPrompt(
   issueCtx?: IssueHeartbeatContext,
 ): string {
   const rosterSummary = agentRoster
-    .filter((a) => a.name !== "bmad-ceo") // Exclude CEO from delegation targets
-    .map((a) => `  - ${a.name} (${a.title}): ${a.capabilities ?? a.role}`)
+    .filter((a) => {
+      const bmadRole = (a.metadata as Record<string, unknown> | undefined)?.bmadRole;
+      return bmadRole !== "bmad-ceo" && a.name !== "bmad-ceo";
+    })
+    .map((a) => {
+      const bmadRole = (a.metadata as Record<string, unknown> | undefined)?.bmadRole as string | undefined;
+      const roleKey = bmadRole ?? a.name;
+      return `  - ${roleKey} (${a.name}${a.title ? ` — ${a.title}` : ""}): ${a.capabilities ?? a.role}`;
+    })
     .join("\n");
 
   const contextSections: string[] = [];
@@ -272,6 +284,7 @@ function buildDelegationPrompt(
 - **Priority**: ${issue.priority ?? "medium"}
 ${contextBlock}
 ## Available Agents
+The first identifier on each line is the **role key** — use it in the \`assignTo\` field.
 ${rosterSummary}
 
 ## Your Task
@@ -1193,35 +1206,10 @@ export async function reEvaluateDelegation(
     })),
   });
 
-  // Non-story issues: existing behavior (dependency-based promotion)
-  let promoted = 0;
-  for (const child of nonStoryIssues) {
-    if (child.status !== "backlog") continue;
-    const meta = child.metadata as Record<string, unknown> | undefined;
-    const dependsOn = Array.isArray(meta?.dependsOn) ? (meta.dependsOn as number[]) : [];
-
-    if (dependsOn.length === 0) {
-      await client.updateIssue(child.id, { status: "todo" });
-      promoted++;
-      log.info("Promoted non-story task (no deps)", { issueId: child.id, title: child.title });
-      continue;
-    }
-
-    const allDepsDone = dependsOn.every((depIdx) => {
-      const depStatus = taskStatusByIndex.get(depIdx);
-      return depStatus === "done";
-    });
-
-    if (allDepsDone) {
-      await client.updateIssue(child.id, { status: "todo" });
-      promoted++;
-      log.info("Promoted non-story task (deps met)", {
-        issueId: child.id,
-        title: child.title,
-        dependsOn,
-      });
-    }
-  }
+  // Non-story issues: delegate to lifecycle.ts dependency checker
+  // (Primary promotion happens synchronously in wakeParent() when a dep completes.
+  //  This is a safety net for backlog issues that may have been missed.)
+  let promoted = await checkSiblingDependencies(client, parentIssue.id);
 
   // M1: Story issues — sequential promotion (one at a time)
   if (storyIssues.length > 0) {

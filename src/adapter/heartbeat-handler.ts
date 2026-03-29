@@ -379,8 +379,9 @@ const VALID_WORK_PHASES = new Set<string>([
   "research", "domain-research", "market-research", "technical-research",
   "create-prd", "create-architecture", "create-ux-design", "create-product-brief",
   "create-epics", "check-implementation-readiness",
-  "e2e-tests", "documentation", "quick-dev",
-  "editorial-review", "delegated-task",
+  "e2e-tests", "test-design", "documentation", "generate-project-context", "quick-dev",
+  "editorial-review", "epic-retrospective", "correct-course",
+  "delegated-task", "ceo-delegation", "ceo-reeval",
 ]);
 
 /**

@@ -331,10 +331,13 @@ async function markDone(
 }
 
 /**
- * Post a completion notice on the parent issue.
+ * Post a completion notice on the parent issue and promote unblocked siblings.
  *
- * Paperclip's child_issue_done trigger handles the actual agent wake;
- * this comment is for the audit trail.
+ * When a child completes:
+ * 1. Posts an audit-trail comment on the parent
+ * 2. Checks all siblings under the same parent for dependency satisfaction
+ * 3. Promotes any backlog siblings whose deps are now met → `todo`
+ *    (Paperclip fires a heartbeat on backlog→todo, waking the assignee)
  */
 export async function wakeParent(
   client: PaperclipClient,
@@ -350,6 +353,15 @@ export async function wakeParent(
       `📋 Sub-task **${identifier}** ("${issue.title.slice(0, 60)}") completed.`,
     );
     log.info("Woke parent", { issueId: issueId.slice(0, 8), parentId: issue.parentId.slice(0, 8) });
+
+    // Promote any siblings whose dependencies are now satisfied
+    const promoted = await checkSiblingDependencies(client, issue.parentId);
+    if (promoted > 0) {
+      await client.addIssueComment(
+        issue.parentId,
+        `🔓 Promoted **${promoted}** sibling(s) from backlog → todo (deps unblocked by ${identifier}).`,
+      );
+    }
   } catch (err) {
     log.warn("Failed to wake parent (non-fatal)", {
       issueId: issueId.slice(0, 8),
@@ -373,4 +385,146 @@ async function mergeMetadata(
   } catch {
     return { ...newFields };
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dependency-Based Promotion
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Check sibling issues under the same parent and promote any whose
+ * dependencies are now satisfied from `backlog` → `todo`.
+ *
+ * This is called automatically when a child issue completes (via wakeParent).
+ * Paperclip fires an agent heartbeat on backlog→todo transitions, so promoted
+ * siblings will be picked up immediately — no CEO re-eval cycle needed.
+ *
+ * @param client - Paperclip API client
+ * @param parentId - The parent issue ID whose children should be checked
+ * @returns Number of siblings promoted
+ */
+export async function checkSiblingDependencies(
+  client: PaperclipClient,
+  parentId: string,
+): Promise<number> {
+  let siblings: import("./paperclip-client.js").PaperclipIssue[];
+  try {
+    siblings = await client.listIssues({ parentId });
+  } catch (err) {
+    log.warn("Failed to fetch siblings for dependency check", {
+      parentId: parentId.slice(0, 8),
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return 0;
+  }
+
+  // Build taskIndex → status map
+  const statusByIndex = new Map<number, string>();
+  for (const sib of siblings) {
+    const meta = sib.metadata as Record<string, unknown> | undefined;
+    const idx = meta?.taskIndex;
+    if (typeof idx === "number") {
+      statusByIndex.set(idx, sib.status);
+    }
+  }
+
+  let promoted = 0;
+  for (const sib of siblings) {
+    if (sib.status !== "backlog") continue;
+
+    const meta = sib.metadata as Record<string, unknown> | undefined;
+
+    // Skip refined stories (those with storySequence) — they use
+    // sequential promotion logic in ceo-orchestrator, not dependency-based.
+    if (typeof meta?.storySequence === "number") continue;
+
+    const dependsOn = Array.isArray(meta?.dependsOn)
+      ? (meta.dependsOn as number[])
+      : [];
+
+    // No deps — should already be todo, but promote as safety net
+    if (dependsOn.length === 0) {
+      await client.updateIssue(sib.id, { status: "todo" });
+      promoted++;
+      log.info("Promoted sibling (no deps)", {
+        issueId: sib.id.slice(0, 8),
+        identifier: sib.identifier,
+      });
+      continue;
+    }
+
+    const allDepsDone = dependsOn.every((depIdx) => {
+      return statusByIndex.get(depIdx) === "done";
+    });
+
+    if (allDepsDone) {
+      await client.updateIssue(sib.id, { status: "todo" });
+      promoted++;
+      log.info("Promoted sibling (deps met)", {
+        issueId: sib.id.slice(0, 8),
+        identifier: sib.identifier,
+        dependsOn,
+      });
+    }
+  }
+
+  // Wake agents for `todo` siblings whose deps just became met.
+  // These were promoted earlier but skipped by the heartbeat prereq guard
+  // because their deps weren't done yet. Now they are — post a comment on
+  // the sibling issue to trigger Paperclip's `issue_commented` wakeup.
+  let woken = 0;
+  for (const sib of siblings) {
+    if (sib.status !== "todo") continue;
+    if (!sib.assigneeAgentId) continue;
+
+    const meta = sib.metadata as Record<string, unknown> | undefined;
+    if (typeof meta?.storySequence === "number") continue;
+
+    const dependsOn = Array.isArray(meta?.dependsOn)
+      ? (meta.dependsOn as number[])
+      : [];
+    if (dependsOn.length === 0) continue;
+
+    const allDepsDone = dependsOn.every((depIdx) => {
+      return statusByIndex.get(depIdx) === "done";
+    });
+
+    if (allDepsDone) {
+      try {
+        const depLabels = dependsOn.map((d) => {
+          const dep = siblings.find((s) => {
+            const m = s.metadata as Record<string, unknown> | undefined;
+            return m?.taskIndex === d;
+          });
+          return dep?.identifier ?? `task-${d}`;
+        });
+        await client.addIssueComment(
+          sib.id,
+          `🔓 Dependencies met (${depLabels.join(", ")} done). Ready to proceed.`,
+        );
+        woken++;
+        log.info("Woke todo sibling (deps now met)", {
+          issueId: sib.id.slice(0, 8),
+          identifier: sib.identifier,
+          dependsOn,
+        });
+      } catch (err) {
+        log.warn("Failed to wake todo sibling (non-fatal)", {
+          issueId: sib.id.slice(0, 8),
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  if (promoted > 0 || woken > 0) {
+    log.info("Dependency check complete", {
+      parentId: parentId.slice(0, 8),
+      promoted,
+      woken,
+      totalSiblings: siblings.length,
+    });
+  }
+
+  return promoted;
 }

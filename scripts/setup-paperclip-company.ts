@@ -120,6 +120,8 @@ interface AgentDef {
   name: string;
   /** Human-readable display title */
   title: string;
+  /** Stable BMAD role key used throughout the codebase (e.g., "bmad-pm", "bmad-dev") */
+  bmadRoleKey: string;
   /** Paperclip role category */
   role: string;
   /** Lucide icon name for the Paperclip UI */
@@ -194,8 +196,9 @@ const PROXY_ENV: Record<string, string> = {
 const AGENT_DEFS: AgentDef[] = [
   // ── Tier 0: CEO ─────────────────────────────────────────────────────
   {
-    name: "bmad-ceo",
+    name: "Jay",
     title: "CEO",
+    bmadRoleKey: "bmad-ceo",
     role: "ceo",
     icon: "crown",
     capabilities: "Strategic orchestration, issue decomposition, phased delegation, progress monitoring, governance",
@@ -209,13 +212,14 @@ const AGENT_DEFS: AgentDef[] = [
 
   // ── Tier 1: Direct reports to CEO ────────────────────────────────────
   {
-    name: "bmad-pm",
-    title: "John",
+    name: "John",
+    title: "Product Manager",
+    bmadRoleKey: "bmad-pm",
     role: "pm",
     icon: "clipboard",
     capabilities: "PRD creation, user stories, market research, requirements, epics, brainstorming, product briefs",
     configDir: "pm",
-    reportsTo: "bmad-ceo",
+    reportsTo: "Jay",
     heartbeatEnabled: false,
     heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 30_000,
@@ -227,52 +231,56 @@ const AGENT_DEFS: AgentDef[] = [
     ],
   },
   {
-    name: "bmad-architect",
-    title: "Winston",
+    name: "Winston",
+    title: "Architect",
+    bmadRoleKey: "bmad-architect",
     role: "engineer",
     icon: "blocks",
     capabilities: "Architecture design, technical research, domain research, system design, technology evaluation",
     configDir: "architect",
-    reportsTo: "bmad-ceo",
+    reportsTo: "Jay",
     heartbeatEnabled: false,
     heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 30_000,
     bmadSkills: ["bmad-create-architecture", "bmad-technical-research", "bmad-domain-research"],
   },
   {
-    name: "bmad-analyst",
-    title: "Mary",
+    name: "Mary",
+    title: "Analyst",
+    bmadRoleKey: "bmad-analyst",
     role: "researcher",
     icon: "bar-chart-3",
     capabilities: "Market analysis, domain research, brainstorming, advanced elicitation, feasibility studies",
     configDir: "analyst",
-    reportsTo: "bmad-ceo",
+    reportsTo: "Jay",
     heartbeatEnabled: false,
     heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 20_000,
     bmadSkills: ["bmad-brainstorming", "bmad-market-research", "bmad-domain-research", "bmad-advanced-elicitation"],
   },
   {
-    name: "bmad-ux-designer",
-    title: "Sally",
+    name: "Sally",
+    title: "UX Designer",
+    bmadRoleKey: "bmad-ux-designer",
     role: "designer",
     icon: "layout-template",
     capabilities: "UX patterns, interaction design, wireframes, design specs, accessibility",
     configDir: "ux-designer",
-    reportsTo: "bmad-ceo",
+    reportsTo: "Jay",
     heartbeatEnabled: false,
     heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 15_000,
     bmadSkills: ["bmad-create-ux-design"],
   },
   {
-    name: "bmad-tech-writer",
-    title: "Paige",
+    name: "Paige",
+    title: "Tech Writer",
+    bmadRoleKey: "bmad-tech-writer",
     role: "engineer",
     icon: "notebook-pen",
     capabilities: "Documentation, project context generation, editorial review, doc sharding, indexing",
     configDir: "tech-writer",
-    reportsTo: "bmad-ceo",
+    reportsTo: "Jay",
     heartbeatEnabled: false,
     heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 15_000,
@@ -285,26 +293,28 @@ const AGENT_DEFS: AgentDef[] = [
 
   // ── Tier 2: Reports to PM ────────────────────────────────────────────
   {
-    name: "bmad-dev",
-    title: "Amelia",
+    name: "Amelia",
+    title: "Developer",
+    bmadRoleKey: "bmad-dev",
     role: "engineer",
     icon: "code",
     capabilities: "Story implementation, code writing, test creation, quick development, TypeScript specialist",
     configDir: "developer",
-    reportsTo: "bmad-pm",
+    reportsTo: "John",
     heartbeatEnabled: false,
     heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 30_000,
     bmadSkills: ["bmad-dev-story", "bmad-quick-dev", "bmad-quick-spec"],
   },
   {
-    name: "bmad-sm",
-    title: "Bob",
+    name: "Bob",
+    title: "Scrum Master",
+    bmadRoleKey: "bmad-sm",
     role: "pm",
     icon: "gantt-chart",
     capabilities: "Sprint planning, sprint status, course correction, retrospectives, impediment removal",
     configDir: "scrum-master",
-    reportsTo: "bmad-pm",
+    reportsTo: "John",
     heartbeatEnabled: false,
     heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 15_000,
@@ -313,13 +323,14 @@ const AGENT_DEFS: AgentDef[] = [
 
   // ── Tier 2: Reports to Architect ─────────────────────────────────────
   {
-    name: "bmad-qa",
-    title: "Quinn",
+    name: "Quinn",
+    title: "QA Engineer",
+    bmadRoleKey: "bmad-qa",
     role: "qa",
     icon: "test-tube",
     capabilities: "Code review, adversarial review, edge-case hunting, E2E test generation, quality gates, test architecture",
     configDir: "qa",
-    reportsTo: "bmad-architect",
+    reportsTo: "Winston",
     heartbeatEnabled: false,
     heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 25_000,
@@ -333,13 +344,14 @@ const AGENT_DEFS: AgentDef[] = [
 
   // ── Standalone: Quick-Flow Solo Dev ──────────────────────────────────
   {
-    name: "bmad-quick-flow",
-    title: "Barry",
+    name: "Barry",
+    title: "Quick-Flow Solo Dev",
+    bmadRoleKey: "bmad-quick-flow-solo-dev",
     role: "engineer",
     icon: "fast-forward",
     capabilities: "Full solo dev flow: spec, implement, review in one pass. For quick/small tasks",
     configDir: "quick-flow",
-    reportsTo: "bmad-pm",
+    reportsTo: "John",
     heartbeatEnabled: false,
     heartbeatIntervalSec: 0, // demand-only: wakes on assignment
     budgetMonthlyCents: 20_000,
@@ -657,13 +669,18 @@ async function createAgents(): Promise<Map<string, string>> {
     if (existingAgent) {
       agentIds.set(def.name, existingAgent.id);
 
-      // Always sync adapterConfig so env changes (proxy, OTel) propagate
-      // to existing agents without requiring a --clean reset.
+      // Always sync adapterConfig and metadata.bmadRole so env changes
+      // (proxy, OTel) and role key updates propagate without --reset.
       try {
+        // Merge bmadRole into existing metadata to avoid clobbering other fields
+        const existingMeta = (existingAgent as unknown as { metadata?: Record<string, unknown> }).metadata ?? {};
         await paperclip<PaperclipAgent>(
           "PATCH",
           `/api/agents/${existingAgent.id}`,
-          { adapterConfig: desiredAdapterConfig },
+          {
+            adapterConfig: desiredAdapterConfig,
+            metadata: { ...existingMeta, bmadRole: def.bmadRoleKey, configDir: def.configDir },
+          },
         );
         log(`${DIM}♻️${NC}`, `Already exists: ${def.name} → ${existingAgent.id} (config synced)`);
       } catch (syncErr) {
@@ -681,7 +698,7 @@ async function createAgents(): Promise<Map<string, string>> {
     };
 
     const metadata: Record<string, unknown> = {
-      bmadRole: def.name,
+      bmadRole: def.bmadRoleKey,
       bmadSkills: def.bmadSkills,
       configDir: def.configDir,
     };
@@ -884,70 +901,7 @@ async function verifySetup(agentIds: Map<string, string>): Promise<void> {
   console.log(`  ${"─".repeat(60)}`);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Step 5b: Seed generate-project-context issue
-// ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Create the initial generate-project-context issue assigned to the tech-writer.
- *
- * This seeds the first heartbeat so the tech-writer auto-generates
- * project-context.md on the first run. Idempotent — skipped if a
- * generate-project-context issue already exists.
- */
-async function ensureProjectContextIssue(agentIds: Map<string, string>): Promise<void> {
-  header("Step 5b: Seed generate-project-context Issue");
-
-  if (FLAGS.dryRun) {
-    log("🏃", "Dry run — skipping issue creation");
-    return;
-  }
-
-  // Check if one already exists
-  const existing = await paperclip<{ items?: unknown[]; data?: unknown[] }>(
-    "GET",
-    `/api/companies/${COMPANY_ID}/issues?status=todo&limit=50`,
-  );
-  const items = (existing.items ?? existing.data ?? existing) as Array<Record<string, unknown>>;
-  const alreadyExists = Array.isArray(items) && items.some(
-    (i) => (i.metadata as Record<string, unknown> | undefined)?.workPhase === "generate-project-context",
-  );
-
-  if (alreadyExists) {
-    log("♻️ ", "generate-project-context issue already exists — skipping");
-    return;
-  }
-
-  const techWriterId = agentIds.get("bmad-tech-writer");
-  if (!techWriterId) {
-    log(`${YELLOW}⚠️${NC}`, "Tech writer agent not found — skipping generate-project-context issue");
-    return;
-  }
-
-  try {
-    const issue = await paperclip<{ id: string; identifier?: string }>(
-      "POST",
-      `/api/companies/${COMPANY_ID}/issues`,
-      {
-        title: "Generate project context file",
-        description:
-          "Run the bmad-generate-project-context skill to produce project-context.md. " +
-          "Use defaults from bmad_res/bmm/config.yaml. Analyze the codebase and save the output. " +
-          "Mark this issue done when complete.",
-        status: "todo",
-        assigneeAgentId: techWriterId,
-        metadata: {
-          workPhase: "generate-project-context",
-          bmadPhase: "define",
-          delegatedBy: "setup-script",
-        },
-      },
-    );
-    log(`${GREEN}✅${NC}`, `Created generate-project-context issue: ${issue.identifier ?? issue.id}`);
-  } catch (err) {
-    log(`${YELLOW}⚠️${NC}`, `Failed to create generate-project-context issue (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main
@@ -984,9 +938,6 @@ async function main(): Promise<void> {
 
   // Step 5: Set instructions paths
   await setInstructionsPaths(agentIds);
-
-  // Step 5b: Create generate-project-context seed issue (if not already present)
-  await ensureProjectContextIssue(agentIds);
 
   // Step 6: Verify
   await verifySetup(agentIds);

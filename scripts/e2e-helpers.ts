@@ -28,16 +28,16 @@ export const AGENTS: Record<string, string> = {};
 
 /** Agent name → short key mapping for AGENTS object. */
 export const AGENT_NAME_TO_KEY: Record<string, string> = {
-  "bmad-ceo": "ceo",
-  "bmad-pm": "pm",
-  "bmad-architect": "architect",
-  "bmad-dev": "dev",
-  "bmad-qa": "qa",
-  "bmad-sm": "sm",
-  "bmad-analyst": "analyst",
-  "bmad-ux-designer": "ux",
-  "bmad-tech-writer": "techWriter",
-  "bmad-quick-flow": "quickFlow",
+  "Jay": "ceo",
+  "John": "pm",
+  "Winston": "architect",
+  "Amelia": "dev",
+  "Quinn": "qa",
+  "Bob": "sm",
+  "Mary": "analyst",
+  "Sally": "ux",
+  "Paige": "techWriter",
+  "Barry": "quickFlow",
 };
 
 /** Reverse lookup: short key → agent name. */

@@ -592,9 +592,11 @@ export class AgentDispatcher {
     this.modelStrategy = loadModelStrategyConfig();
 
     // Resolve skill directories — filter to only directories that exist on disk
+    // NOTE: .github/skills is excluded — it contains interactive BMAD skills (bmad-init,
+    // bmad-agent-* persona SKILL.md files) that conflict with autonomous headless sessions
+    // by triggering interactive config prompts. Only src/skills (factory tools) are used.
     this.skillDirs = [
       resolve(config.projectRoot, "src/skills"),
-      resolve(config.projectRoot, ".github/skills"),
     ].filter((dir) => existsSync(dir));
   }
 

@@ -261,9 +261,10 @@ function resolveSkillDirectories(mapping: RoleMappingEntry, projectRoot: string)
   }
 
   // 3. Global skill search paths (factory-level)
+  // NOTE: .github/skills is excluded — it contains interactive BMAD skills (bmad-init,
+  // bmad-agent-* persona SKILL.md files) that conflict with autonomous headless sessions.
   const globalDirs = [
     resolve(projectRoot, "src/skills"),
-    resolve(projectRoot, ".github/skills"),
   ];
   for (const dir of globalDirs) {
     if (existsSync(dir) && !dirs.includes(dir)) {

@@ -186,7 +186,7 @@ fi
 header "Step 5: Start Paperclip server"
 
 export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-dev-secret-bmad}"
-export DATABASE_URL="postgresql://paperclip:paperclip@localhost:5432/paperclip"
+export DATABASE_URL="postgresql://paperclip:paperclip@localhost:5433/paperclip"
 export PORT=3100
 export SERVE_UI=true
 export PAPERCLIP_DEPLOYMENT_MODE=local_trusted
